@@ -1,0 +1,4 @@
+kinematics_node:
+  ros__parameters:
+    wheel_separation: 0.55
+    wheel_radius: 0.12
