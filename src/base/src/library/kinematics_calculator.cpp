@@ -5,7 +5,8 @@ namespace base {
 KinematicsCalculator::KinematicsCalculator(double wheel_separation, double wheel_radius)
     : wheel_sep_(wheel_separation), wheel_rad_(wheel_radius) {}
 
-WheelSpeedSet KinematicsCalculator::calculateWheelSpeeds(double linear_x, double angular_z) {
+// inverse kinematic: translates movement commands into the required individual wheel speeds.
+WheelSpeedSet KinematicsCalculator::calculateWheelSpeeds(double linear_x, double angular_z) {    
     // Differential drive kinematics equation
     // V_left = V - (omega * width / 2)
     // V_right = V + (omega * width / 2)
@@ -14,6 +15,7 @@ WheelSpeedSet KinematicsCalculator::calculateWheelSpeeds(double linear_x, double
     double vel_left = linear_x - (angular_z * wheel_sep_ / 2.0);
     double vel_right = linear_x + (angular_z * wheel_sep_ / 2.0);
 
+    //Angular velocity
     double rad_s_left = vel_left / wheel_rad_;
     double rad_s_right = vel_right / wheel_rad_;
 
