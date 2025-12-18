@@ -3,7 +3,7 @@ Dieses Repository wird für die Entwicklung der Base vom FloriBot_Pi genutzt
 
 # Klonen des Repository
 ```
-git clone https://github.com/Team-FloriBot/FloriBot-ROS2.git
+git clone https://github.com/Team-FloriBot/FloriBot_Pi.git
 ```
 ```
 cd FloriBot_Pi
