@@ -1,4 +1,6 @@
 kinematics_node:
   ros__parameters:
-    wheel_separation: 0.55
-    wheel_radius: 0.12
+    wheel_base_m: 0.50
+    v_max_mps: 0.8
+    cmd_vel_topic: /cmd_vel
+    wheel_cmd_topic: /base/wheel_cmd
