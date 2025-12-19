@@ -8,6 +8,9 @@ hardware_node:
 
     k_us_per_pct: 5.5
     neutral_us: 1480
+    min_us: 900
+    max_us: 2100
+
     pct_min: -100
     pct_max: 100
 
