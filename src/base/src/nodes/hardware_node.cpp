@@ -38,8 +38,9 @@ private:
   {
     if (msg->data.size() < 2) return;
 
-    int left  = std::clamp(msg->data[0], -100, 100);
-    int right = std::clamp(msg->data[1], -100, 100);
+    const int left  = std::clamp(static_cast<int>(msg->data[0]), -100, 100);
+    const int right = std::clamp(static_cast<int>(msg->data[1]), -100, 100);
+
 
     RCLCPP_INFO(
       get_logger(),
