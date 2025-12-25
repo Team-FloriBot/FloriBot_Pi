@@ -1,66 +1,14 @@
 #include "base/sensor_aggregator_node.h"
 
-#include <sensor_msgs/msg/joint_state.hpp>
-
 #include <algorithm>
-#include <cstdint>
-#include <string>
-#include <vector>
+#include <cmath>
 
 using std::placeholders::_1;
 
 namespace base {
 
-SensorAggregatorNode::SensorAggregatorNode() : Node("sensor_aggregator_node") {
-    // Publisher: Aggregierte Radgeschwindigkeiten (wie bisher)
-    pub_wheel_states_ = this->create_publisher<base::msg::WheelVelocities>("/wheel_states", 10);
-
-    // Publisher: Encoder-Ticks (aus echten Phidget-Encoderpositionen)
-    pub_wheel_ticks_ = this->create_publisher<base::msg::WheelTicks4>("/base/wheel_ticks4", 10);
-
-    // Abonnements für die vier individuellen Controller-Status-Topics (wie bisher)
-    sub_fl_ = this->create_subscription<base::msg::WheelControllerState>(
-        "/wheel_controller_fl/state", 10, std::bind(&SensorAggregatorNode::flStateCallback, this, _1));
-    sub_fr_ = this->create_subscription<base::msg::WheelControllerState>(
-        "/wheel_controller_fr/state", 10, std::bind(&SensorAggregatorNode::frStateCallback, this, _1));
-    sub_rl_ = this->create_subscription<base::msg::WheelControllerState>(
-        "/wheel_controller_rl/state", 10, std::bind(&SensorAggregatorNode::rlStateCallback, this, _1));
-    sub_rr_ = this->create_subscription<base::msg::WheelControllerState>(
-        "/wheel_controller_rr/state", 10, std::bind(&SensorAggregatorNode::rrStateCallback, this, _1));
-
-    // NEW: JointStates von Phidget HighSpeedEncoder
-    // Default: phidgets_high_speed_encoder publisht /joint_states
-    joint_states_topic_ = this->declare_parameter<std::string>("joint_states_topic", "/joint_states");
-    sub_joint_states_ = this->create_subscription<sensor_msgs::msg::JointState>(
-        joint_states_topic_, 10, std::bind(&SensorAggregatorNode::jointStatesCallback, this, _1));
-
-    // Timer, um die gesammelten Daten regelmäßig (z.B. 50Hz) zu veröffentlichen
-    timer_ = this->create_wall_timer(
-        std::chrono::milliseconds(20),
-        std::bind(&SensorAggregatorNode::publishAggregatedStates, this));
-
-    RCLCPP_INFO(this->get_logger(), "Sensor Aggregator Node Initialized.");
-}
-
-void SensorAggregatorNode::flStateCallback(const base::msg::WheelControllerState::SharedPtr msg) {
-    current_velocities_.front_left = msg->measured_velocity;
-}
-
-void SensorAggregatorNode::frStateCallback(const base::msg::WheelControllerState::SharedPtr msg) {
-    current_velocities_.front_right = msg->measured_velocity;
-}
-
-void SensorAggregatorNode::rlStateCallback(const base::msg::WheelControllerState::SharedPtr msg) {
-    current_velocities_.rear_left = msg->measured_velocity;
-}
-
-void SensorAggregatorNode::rrStateCallback(const base::msg::WheelControllerState::SharedPtr msg) {
-    current_velocities_.rear_right = msg->measured_velocity;
-}
-
 static bool getJointPosition(const sensor_msgs::msg::JointState &js, const std::string &name, double &pos_out)
 {
-    // Find joint index by name and read position if available
     auto it = std::find(js.name.begin(), js.name.end(), name);
     if (it == js.name.end()) return false;
 
@@ -71,46 +19,101 @@ static bool getJointPosition(const sensor_msgs::msg::JointState &js, const std::
     return true;
 }
 
+static int64_t toTicks(double pos, bool invert)
+{
+    const int64_t t = static_cast<int64_t>(std::llround(pos));
+    return invert ? -t : t;
+}
+
+SensorAggregatorNode::SensorAggregatorNode() : Node("sensor_aggregator_node")
+{
+    pub_wheel_states_ = this->create_publisher<base::msg::WheelVelocities>("/wheel_states", 10);
+    pub_wheel_ticks_  = this->create_publisher<base::msg::WheelTicks4>("/base/wheel_ticks4", 10);
+
+    sub_fl_ = this->create_subscription<base::msg::WheelControllerState>(
+        "/wheel_controller_fl/state", 10, std::bind(&SensorAggregatorNode::flStateCallback, this, _1));
+    sub_fr_ = this->create_subscription<base::msg::WheelControllerState>(
+        "/wheel_controller_fr/state", 10, std::bind(&SensorAggregatorNode::frStateCallback, this, _1));
+    sub_rl_ = this->create_subscription<base::msg::WheelControllerState>(
+        "/wheel_controller_rl/state", 10, std::bind(&SensorAggregatorNode::rlStateCallback, this, _1));
+    sub_rr_ = this->create_subscription<base::msg::WheelControllerState>(
+        "/wheel_controller_rr/state", 10, std::bind(&SensorAggregatorNode::rrStateCallback, this, _1));
+
+    // Params: joint_states topic + mapping
+    joint_states_topic_ = this->declare_parameter<std::string>("joint_states_topic", "/joint_states");
+
+    fl_joint_ = this->declare_parameter<std::string>("fl_joint", fl_joint_);
+    fr_joint_ = this->declare_parameter<std::string>("fr_joint", fr_joint_);
+    rl_joint_ = this->declare_parameter<std::string>("rl_joint", rl_joint_);
+    rr_joint_ = this->declare_parameter<std::string>("rr_joint", rr_joint_);
+
+    invert_fl_ = this->declare_parameter<bool>("invert_fl", false);
+    invert_fr_ = this->declare_parameter<bool>("invert_fr", false);
+    invert_rl_ = this->declare_parameter<bool>("invert_rl", false);
+    invert_rr_ = this->declare_parameter<bool>("invert_rr", false);
+
+    sub_joint_states_ = this->create_subscription<sensor_msgs::msg::JointState>(
+        joint_states_topic_, 10, std::bind(&SensorAggregatorNode::jointStatesCallback, this, _1));
+
+    timer_ = this->create_wall_timer(
+        std::chrono::milliseconds(20),
+        std::bind(&SensorAggregatorNode::publishAggregatedStates, this));
+
+    RCLCPP_INFO(this->get_logger(),
+        "SensorAggregator: joints FL=%s FR=%s RL=%s RR=%s (topic=%s)",
+        fl_joint_.c_str(), fr_joint_.c_str(), rl_joint_.c_str(), rr_joint_.c_str(),
+        joint_states_topic_.c_str());
+}
+
+void SensorAggregatorNode::flStateCallback(const base::msg::WheelControllerState::SharedPtr msg) {
+    current_velocities_.front_left = msg->measured_velocity;
+}
+void SensorAggregatorNode::frStateCallback(const base::msg::WheelControllerState::SharedPtr msg) {
+    current_velocities_.front_right = msg->measured_velocity;
+}
+void SensorAggregatorNode::rlStateCallback(const base::msg::WheelControllerState::SharedPtr msg) {
+    current_velocities_.rear_left = msg->measured_velocity;
+}
+void SensorAggregatorNode::rrStateCallback(const base::msg::WheelControllerState::SharedPtr msg) {
+    current_velocities_.rear_right = msg->measured_velocity;
+}
+
 void SensorAggregatorNode::jointStatesCallback(const sensor_msgs::msg::JointState::SharedPtr msg)
 {
-    // Default mapping: joint0..joint3 -> fl, fr, rl, rr
-    // (später parametrierbar, aber jetzt deterministisch und passend zu deiner Ausgabe)
-    double p0, p1, p2, p3;
-    const bool ok0 = getJointPosition(*msg, "joint0", p0);
-    const bool ok1 = getJointPosition(*msg, "joint1", p1);
-    const bool ok2 = getJointPosition(*msg, "joint2", p2);
-    const bool ok3 = getJointPosition(*msg, "joint3", p3);
+    double pfl, pfr, prl, prr;
+    const bool ok_fl = getJointPosition(*msg, fl_joint_, pfl);
+    const bool ok_fr = getJointPosition(*msg, fr_joint_, pfr);
+    const bool ok_rl = getJointPosition(*msg, rl_joint_, prl);
+    const bool ok_rr = getJointPosition(*msg, rr_joint_, prr);
 
-    if (!(ok0 && ok1 && ok2 && ok3)) {
+    if (!(ok_fl && ok_fr && ok_rl && ok_rr)) {
         RCLCPP_WARN_THROTTLE(
             this->get_logger(), *this->get_clock(), 2000,
-            "joint_states missing one of joint0..joint3 (names/positions not available yet)");
+            "joint_states missing mapping: FL(%s)=%d FR(%s)=%d RL(%s)=%d RR(%s)=%d",
+            fl_joint_.c_str(), (int)ok_fl,
+            fr_joint_.c_str(), (int)ok_fr,
+            rl_joint_.c_str(), (int)ok_rl,
+            rr_joint_.c_str(), (int)ok_rr);
         return;
     }
 
-    // Position ist bei dir bereits ein Zählwert (Integer als double, z.B. 898.0)
-    // Wir übernehmen das als kumulative Ticks.
-    fl_ticks_ = static_cast<int64_t>(std::llround(p0));
-    fr_ticks_ = static_cast<int64_t>(std::llround(p1));
-    rl_ticks_ = static_cast<int64_t>(std::llround(p2));
-    rr_ticks_ = static_cast<int64_t>(std::llround(p3));
+    fl_ticks_ = toTicks(pfl, invert_fl_);
+    fr_ticks_ = toTicks(pfr, invert_fr_);
+    rl_ticks_ = toTicks(prl, invert_rl_);
+    rr_ticks_ = toTicks(prr, invert_rr_);
 
-    last_joint_stamp_ = msg->header.stamp;
+    last_joint_stamp_ = (msg->header.stamp.nanoseconds() != 0) ? msg->header.stamp : this->now();
     have_joint_state_ = true;
 }
 
-void SensorAggregatorNode::publishAggregatedStates() {
-    // 1) Veröffentliche die gesammelten und aktuellsten Geschwindigkeiten
+void SensorAggregatorNode::publishAggregatedStates()
+{
     pub_wheel_states_->publish(current_velocities_);
 
-    // 2) Veröffentliche echte (kumulative) Encoder-Ticks aus /joint_states
-    if (!have_joint_state_) {
-        // Encoder noch nicht angekommen
-        return;
-    }
+    if (!have_joint_state_) return;
 
     base::msg::WheelTicks4 ticks;
-    ticks.header.stamp = (last_joint_stamp_.nanoseconds() != 0) ? last_joint_stamp_ : this->now();
+    ticks.header.stamp = last_joint_stamp_;
     ticks.header.frame_id = "base_link";
 
     ticks.fl_ticks = fl_ticks_;
