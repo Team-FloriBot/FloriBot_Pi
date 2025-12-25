@@ -102,7 +102,10 @@ void SensorAggregatorNode::jointStatesCallback(const sensor_msgs::msg::JointStat
     rl_ticks_ = toTicks(prl, invert_rl_);
     rr_ticks_ = toTicks(prr, invert_rr_);
 
-    last_joint_stamp_ = (msg->header.stamp.nanoseconds() != 0) ? msg->header.stamp : this->now();
+    // Convert builtin_interfaces::msg::Time -> rclcpp::Time and check validity
+    rclcpp::Time stamp(msg->header.stamp);
+    last_joint_stamp_ = (stamp.nanoseconds() != 0) ? stamp : this->now();
+
     have_joint_state_ = true;
 }
 
