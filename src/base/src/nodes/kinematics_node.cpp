@@ -19,7 +19,7 @@
 class KinematicsNode : public rclcpp::Node {
 public:
   KinematicsNode() : Node("kinematics_node") {
-    // --- Parameters for cmd_vel -> wheel_cmd (existing function) ---
+    // --- Parameters for cmd_vel -> wheel_cmd ---
     wheel_base_m_ = declare_parameter<double>("wheel_base_m", 0.50);
     v_max_mps_    = declare_parameter<double>("v_max_mps", 0.8);
     cmd_topic_    = declare_parameter<std::string>("cmd_vel_topic", "/cmd_vel");
@@ -36,6 +36,9 @@ public:
     base_frame_ = declare_parameter<std::string>("base_frame", "base_link");
     publish_tf_ = declare_parameter<bool>("publish_tf", true);
 
+    // Debug parameter
+    debug_ = declare_parameter<bool>("debug", true);
+
     // Publishers/Subscribers
     pub_wheel_cmd_ = create_publisher<std_msgs::msg::Int16MultiArray>(out_topic_, 10);
     sub_cmd_ = create_subscription<geometry_msgs::msg::Twist>(
@@ -51,7 +54,21 @@ public:
       [this](const base::msg::WheelTicks4::SharedPtr msg){ onTicks(*msg); }
     );
 
-    RCLCPP_INFO(get_logger(), "KinematicsNode initialized: cmd_vel->wheel_cmd + wheel_ticks4->odom");
+    // Sanity print
+    RCLCPP_INFO(get_logger(),
+      "KinematicsNode params: wheel_base_m=%.6f wheel_radius_m=%.6f ticks_per_rev=%ld ticks_topic=%s odom_topic=%s",
+      wheel_base_m_, wheel_radius_m_, static_cast<long>(ticks_per_rev_),
+      ticks_topic_.c_str(), odom_topic_.c_str());
+
+    if (wheel_base_m_ <= 1e-6) {
+      RCLCPP_WARN(get_logger(), "wheel_base_m is %.6f (<=0). Odometry will be invalid.", wheel_base_m_);
+    }
+    if (wheel_radius_m_ <= 1e-6) {
+      RCLCPP_WARN(get_logger(), "wheel_radius_m is %.6f (<=0). Odometry distance will be ~0.", wheel_radius_m_);
+    }
+    if (ticks_per_rev_ <= 0) {
+      RCLCPP_WARN(get_logger(), "ticks_per_rev is %ld (<=0). Odometry disabled.", static_cast<long>(ticks_per_rev_));
+    }
   }
 
 private:
@@ -84,30 +101,30 @@ private:
   }
 
   void onTicks(const base::msg::WheelTicks4& m) {
-    // Timestamp: use message stamp if valid, else node time
     rclcpp::Time t = m.header.stamp;
-    if (t.nanoseconds() == 0) {
-      t = now();
-    }
+    if (t.nanoseconds() == 0) t = now();
 
     if (!have_last_) {
       have_last_ = true;
       last_fl_ = m.fl_ticks; last_fr_ = m.fr_ticks;
       last_rl_ = m.rl_ticks; last_rr_ = m.rr_ticks;
       last_t_  = t;
+
+      if (debug_) {
+        RCLCPP_INFO(get_logger(),
+          "First ticks received: fl=%ld fr=%ld rl=%ld rr=%ld",
+          (long)last_fl_, (long)last_fr_, (long)last_rl_, (long)last_rr_);
+      }
       return;
     }
+
+    if (ticks_per_rev_ <= 0) return;
 
     const int64_t dfl = m.fl_ticks - last_fl_;
     const int64_t dfr = m.fr_ticks - last_fr_;
     const int64_t drl = m.rl_ticks - last_rl_;
     const int64_t drr = m.rr_ticks - last_rr_;
 
-    // meters per tick
-    if (ticks_per_rev_ <= 0) {
-      RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 2000, "ticks_per_rev must be > 0");
-      return;
-    }
     const double meters_per_tick =
       (2.0 * M_PI * wheel_radius_m_) / static_cast<double>(ticks_per_rev_);
 
@@ -116,15 +133,19 @@ private:
     const double ds_rl = static_cast<double>(drl) * meters_per_tick;
     const double ds_rr = static_cast<double>(drr) * meters_per_tick;
 
-    // 4-wheel: average per side
     const double dl = 0.5 * (ds_fl + ds_rl);
     const double dr = 0.5 * (ds_fr + ds_rr);
 
-    // Differential drive approximation
-    const double ds  = 0.5 * (dr + dl);
-    const double dth = (dr - dl) / wheel_base_m_;
+    if (wheel_base_m_ <= 1e-6 || wheel_radius_m_ <= 1e-6) {
+      // Still publish odom, but it won't move meaningfully
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+        "Invalid geometry params: wheel_base_m=%.6f wheel_radius_m=%.6f",
+        wheel_base_m_, wheel_radius_m_);
+    }
 
-    // Midpoint integration
+    const double ds  = 0.5 * (dr + dl);
+    const double dth = (wheel_base_m_ > 1e-6) ? ((dr - dl) / wheel_base_m_) : 0.0;
+
     const double th_mid = th_ + 0.5 * dth;
     x_  += ds * std::cos(th_mid);
     y_  += ds * std::sin(th_mid);
@@ -135,7 +156,12 @@ private:
     const double v = ds / dt;
     const double w = dth / dt;
 
-    // Publish Odometry
+    if (debug_) {
+      RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 500,
+        "dTicks fl=%ld fr=%ld rl=%ld rr=%ld | dl=%.6f dr=%.6f ds=%.6f dth=%.6f | x=%.3f y=%.3f th=%.3f",
+        (long)dfl,(long)dfr,(long)drl,(long)drr, dl, dr, ds, dth, x_, y_, th_);
+    }
+
     nav_msgs::msg::Odometry odom;
     odom.header.stamp = t;
     odom.header.frame_id = odom_frame_;
@@ -190,6 +216,7 @@ private:
   std::string odom_frame_{"odom"};
   std::string base_frame_{"base_link"};
   bool publish_tf_{true};
+  bool debug_{true};
 
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_odom_;
   rclcpp::Subscription<base::msg::WheelTicks4>::SharedPtr sub_ticks_;
