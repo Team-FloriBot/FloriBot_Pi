@@ -1,6 +1,23 @@
 kinematics_node:
   ros__parameters:
+    # cmd_vel -> wheel_cmd
     wheel_base_m: 0.50
     v_max_mps: 0.8
     cmd_vel_topic: /cmd_vel
     wheel_cmd_topic: /base/wheel_cmd
+
+    # ticks -> odom
+    wheel_ticks_topic: /base/wheel_ticks4
+    odom_topic: /odom
+
+    # geometry / scaling (unbedingt korrekt setzen!)
+    wheel_radius_m: 0.08        # [m] Rad-Radius
+    ticks_per_rev: 2048         # Encoder-Ticks pro Umdrehung
+
+    # frames
+    odom_frame: odom
+    base_frame: base_link
+    publish_tf: true
+
+    # Debug (für Diagnose)
+    debug: true
