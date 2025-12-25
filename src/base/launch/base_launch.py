@@ -10,15 +10,14 @@ def generate_launch_description():
     hw  = os.path.join(pkg, 'params', 'hardware_params.yaml')
 
     return LaunchDescription([
-        # --- Wheel Controller Nodes (mit korrektem Remapping) ---
+        # --- Wheel Controller Nodes ---
         Node(
             package='base',
             executable='wheel_controller_node',
             name='wheel_controller_fl',
             output='screen',
             remappings=[
-                ('/wheel_controller/state', '/wheel_controller_fl/state'),
-                ('/wheel_cmd', '/base/wheel_cmd')
+                ('/wheel_commands', '/base/wheel_cmd'),
             ],
         ),
         Node(
@@ -27,8 +26,7 @@ def generate_launch_description():
             name='wheel_controller_fr',
             output='screen',
             remappings=[
-                ('/wheel_controller/state', '/wheel_controller_fr/state'),
-                ('/wheel_cmd', '/base/wheel_cmd')
+                ('/wheel_commands', '/base/wheel_cmd'),
             ],
         ),
         Node(
@@ -37,8 +35,7 @@ def generate_launch_description():
             name='wheel_controller_rl',
             output='screen',
             remappings=[
-                ('/wheel_controller/state', '/wheel_controller_rl/state'),
-                ('/wheel_cmd', '/base/wheel_cmd')
+                ('/wheel_commands', '/base/wheel_cmd'),
             ],
         ),
         Node(
@@ -47,8 +44,7 @@ def generate_launch_description():
             name='wheel_controller_rr',
             output='screen',
             remappings=[
-                ('/wheel_controller/state', '/wheel_controller_rr/state'),
-                ('/wheel_cmd', '/base/wheel_cmd')
+                ('/wheel_commands', '/base/wheel_cmd'),
             ],
         ),
 
