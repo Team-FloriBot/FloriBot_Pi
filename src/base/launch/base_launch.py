@@ -9,41 +9,50 @@ def generate_launch_description():
     kin = os.path.join(pkg, 'params', 'kinematics_params.yaml')
     hw  = os.path.join(pkg, 'params', 'hardware_params.yaml')
 
-    # Falls ihr wheel_controller Parameterdateien habt, hier eintragen.
-    # Wenn nicht, lassen wir parameters erstmal weg.
-    # Beispiel:
-    # wc_fl = os.path.join(pkg, 'params', 'wheel_controller_fl.yaml')
-
     return LaunchDescription([
-        # --- Wheel Controller Nodes (müssen Publisher auf /wheel_controller_*/state sein) ---
+        # --- Wheel Controller Nodes (mit korrektem Remapping) ---
         Node(
             package='base',
             executable='wheel_controller_node',
             name='wheel_controller_fl',
             output='screen',
-            # parameters=[wc_fl],
-            # remappings=[('cmd_in','/...'), ('state_out','/wheel_controller_fl/state')]
+            remappings=[
+                ('/wheel_controller/state', '/wheel_controller_fl/state'),
+                ('/wheel_cmd', '/base/wheel_cmd')
+            ],
         ),
         Node(
             package='base',
             executable='wheel_controller_node',
             name='wheel_controller_fr',
             output='screen',
+            remappings=[
+                ('/wheel_controller/state', '/wheel_controller_fr/state'),
+                ('/wheel_cmd', '/base/wheel_cmd')
+            ],
         ),
         Node(
             package='base',
             executable='wheel_controller_node',
             name='wheel_controller_rl',
             output='screen',
+            remappings=[
+                ('/wheel_controller/state', '/wheel_controller_rl/state'),
+                ('/wheel_cmd', '/base/wheel_cmd')
+            ],
         ),
         Node(
             package='base',
             executable='wheel_controller_node',
             name='wheel_controller_rr',
             output='screen',
+            remappings=[
+                ('/wheel_controller/state', '/wheel_controller_rr/state'),
+                ('/wheel_cmd', '/base/wheel_cmd')
+            ],
         ),
 
-        # --- Aggregation ---
+        # --- Sensor Aggregation ---
         Node(
             package='base',
             executable='sensor_aggregator_node',
@@ -51,7 +60,7 @@ def generate_launch_description():
             output='screen',
         ),
 
-        # --- Kinematics (cmd_vel->wheel_cmd and ticks->odom) ---
+        # --- Kinematics ---
         Node(
             package='base',
             executable='kinematics_node',
@@ -60,7 +69,7 @@ def generate_launch_description():
             parameters=[kin],
         ),
 
-        # --- Hardware output ---
+        # --- Hardware ---
         Node(
             package='base',
             executable='hardware_node',
