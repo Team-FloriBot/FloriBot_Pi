@@ -25,6 +25,7 @@ find_package(rosidl_default_generators REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/WheelVelocities.msg"
   "msg/WheelControllerState.msg"
+  "msg/WheelTicks4.msg"
   DEPENDENCIES std_msgs
 )
 
