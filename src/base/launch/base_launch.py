@@ -58,8 +58,17 @@ def generate_launch_description():
             name='sensor_aggregator_node',
             output='screen',
             parameters=[{
-                "joint_states_topic": "/joint_states"
+              "joint_states_topic": "/joint_states",
+              "fl_joint": "joint2",
+              "fr_joint": "joint3",   # falls du wirklich joint4 hast: "joint4"
+              "rl_joint": "joint0",   # hinten links
+              "rr_joint": "joint1",   # hinten rechts
+              "invert_fl": False,
+              "invert_fr": False,
+              "invert_rl": False,
+              "invert_rr": False,
             }],
+
         ),
 
         # --- Kinematics ---
