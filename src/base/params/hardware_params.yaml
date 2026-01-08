@@ -1,31 +1,15 @@
 hardware_node:
   ros__parameters:
-    # =========================================================
-    # I2C / NXT Servo Controller
-    # =========================================================
     i2c_dev: "/dev/i2c-1"
     i2c_addr: 0x58
 
-    # =========================================================
-    # Servo channel mapping
-    # =========================================================
-    # Seitenzuordnung (Normalbetrieb)
-    left_channels:  [2, 0]    # fl, rl
-    right_channels: [3, 1]    # fr, rr
-
-    # Explizite Radzuordnung für Testmodus / interne Logik
-    # Reihenfolge: [fl, fr, rl, rr]
+    left_channels:  [2, 0]
+    right_channels: [3, 1]
     wheel_channels: [2, 3, 0, 1]
 
-    # =========================================================
-    # Per-wheel gain (Encoder-basierte Feinabstimmung)
-    # Reihenfolge: [fl, fr, rl, rr]
-    # =========================================================
     wheel_gains: [0.94, 1.10, 1.08, 0.91]
+    ignore_wheel_gains: true   # NEU: Gains im Regelbetrieb deaktivieren
 
-    # =========================================================
-    # PWM / Servo mapping
-    # =========================================================
     k_us_per_pct: 5.5
     neutral_us: 1480
     min_us: 900
@@ -34,34 +18,17 @@ hardware_node:
     pct_min: -100
     pct_max: 100
 
-    # Beschleunigungsrampe im Servo-Controller
-    acceleration: 30
+    acceleration: 0            # für erste Regeltests empfohlen
 
-    # =========================================================
-    # Safety
-    # =========================================================
     watchdog_timeout_ms: 300
-
-    # =========================================================
-    # Test mode (Einzelrad-Ansteuerung)
-    # =========================================================
     test_mode: false
 
-    # =========================================================
-    # Phidget Encoder (libphidget22)
-    # =========================================================
-    # Seriennummer des Phidgets (-1 = erstes gefundenes Gerät)
     phidget_serial: -1
-
-    # Zuordnung Phidget-Channel -> Rad
-    # Reihenfolge: [fl, fr, rl, rr]
     encoder_channels: [2, 3, 0, 1]
 
-    # Encoder-Drehrichtung (Vorwärts = positiv)
     invert_fl: true
     invert_fr: false
     invert_rl: true
     invert_rr: false
 
-    # Publish-Rate der Encoder-Ticks
     publish_ticks_ms: 20
