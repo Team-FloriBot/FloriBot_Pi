@@ -26,14 +26,14 @@ kinematics_node:
     use_feedforward: true
 
     # PID (Startwerte)
-    kp: 30.0
+    kp: 18.0
     ki: 0.0
     kd: 0.0
     i_min: -50.0
     i_max: 50.0
 
     # Messwert-Filter gegen Ruckeln (0..1, kleiner = stärker glätten)
-    meas_lpf_alpha: 0.3
+    meas_lpf_alpha: 0.15
 
     # Debug
     debug: true
