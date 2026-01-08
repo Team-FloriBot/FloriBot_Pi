@@ -32,9 +32,7 @@ public:
 
   void open_bus() {
     fd_ = ::open(dev_.c_str(), O_RDWR);
-    if (fd_ < 0) {
-      throw std::runtime_error("open(" + dev_ + ") failed");
-    }
+    if (fd_ < 0) throw std::runtime_error("open(" + dev_ + ") failed");
     if (ioctl(fd_, I2C_SLAVE, addr_) < 0) {
       ::close(fd_);
       fd_ = -1;
@@ -81,28 +79,47 @@ static void phidget_check(PhidgetReturnCode rc, const char* what) {
   if (rc != EPHIDGET_OK) {
     const char* err = nullptr;
     Phidget_getErrorDescription(rc, &err);
-    std::string msg = std::string(what) + " failed: " + (err ? err : "unknown");
-    throw std::runtime_error(msg);
+    throw std::runtime_error(std::string(what) + " failed: " + (err ? err : "unknown"));
   }
 }
 
 class HardwareNode : public rclcpp::Node {
 public:
   HardwareNode() : Node("hardware_node") {
-    // --- I2C params ---
+    // -------------------------
+    // Parameters (I2C / motor)
+    // -------------------------
     i2c_dev_  = declare_parameter<std::string>("i2c_dev", "/dev/i2c-1");
     i2c_addr_ = declare_parameter<int>("i2c_addr", 0x58);
 
-    const auto left_i64  =
-        declare_parameter<std::vector<int64_t>>("left_channels",  std::vector<int64_t>{0, 2});
+    const auto left_i64 =
+      declare_parameter<std::vector<int64_t>>("left_channels",  std::vector<int64_t>{0, 2});
     const auto right_i64 =
-        declare_parameter<std::vector<int64_t>>("right_channels", std::vector<int64_t>{1, 3});
+      declare_parameter<std::vector<int64_t>>("right_channels", std::vector<int64_t>{1, 3});
+
     left_channels_.clear();
     right_channels_.clear();
     for (auto v : left_i64)  left_channels_.push_back(static_cast<int>(v));
     for (auto v : right_i64) right_channels_.push_back(static_cast<int>(v));
 
-    // PWM mapping: us = pct*5.5 + 1480
+    // Optional: explicit wheel->servo channel mapping for test mode: [fl, fr, rl, rr]
+    // If not provided, we derive from left/right: [left[0], right[0], left[1], right[1]]
+    const auto wheel_i64 =
+      declare_parameter<std::vector<int64_t>>("wheel_channels", std::vector<int64_t>{});
+    if (!wheel_i64.empty()) {
+      if (wheel_i64.size() != 4) {
+        throw std::runtime_error("wheel_channels must be 4 entries: [fl, fr, rl, rr]");
+      }
+      wheel_channels_[0] = static_cast<int>(wheel_i64[0]);
+      wheel_channels_[1] = static_cast<int>(wheel_i64[1]);
+      wheel_channels_[2] = static_cast<int>(wheel_i64[2]);
+      wheel_channels_[3] = static_cast<int>(wheel_i64[3]);
+      wheel_channels_valid_ = true;
+    } else {
+      wheel_channels_valid_ = derive_wheel_channels_from_sides();
+    }
+
+    // PWM mapping: us = pct*k + neutral
     k_us_per_pct_ = declare_parameter<double>("k_us_per_pct", 5.5);
     neutral_us_   = declare_parameter<int>("neutral_us", 1480);
     min_us_       = declare_parameter<int>("min_us", 900);
@@ -114,12 +131,16 @@ public:
     accel_ = declare_parameter<int>("acceleration", 30);
     watchdog_ms_ = declare_parameter<int>("watchdog_timeout_ms", 300);
 
-    // --- Encoder (Phidget22) params ---
+    // Test mode: if true, subscribe to /base/wheel_cmd4 and allow per-wheel actuation
+    test_mode_ = declare_parameter<bool>("test_mode", false);
+
+    // -------------------------
+    // Parameters (Phidget encoders)
+    // -------------------------
     phidget_serial_ = declare_parameter<int>("phidget_serial", -1);
 
-    // [fl, fr, rl, rr] -> Phidget channel numbers
     const auto enc_map_i64 =
-        declare_parameter<std::vector<int64_t>>("encoder_channels", std::vector<int64_t>{0,1,2,3});
+      declare_parameter<std::vector<int64_t>>("encoder_channels", std::vector<int64_t>{0, 1, 2, 3});
     if (enc_map_i64.size() != 4) {
       throw std::runtime_error("encoder_channels must have 4 entries: [fl, fr, rl, rr]");
     }
@@ -132,43 +153,56 @@ public:
 
     publish_ticks_ms_ = declare_parameter<int>("publish_ticks_ms", 20);
 
-    // Subscriber: motor cmd
-    sub_ = create_subscription<std_msgs::msg::Int16MultiArray>(
-        "/base/wheel_cmd", 10,
-        std::bind(&HardwareNode::on_cmd, this, std::placeholders::_1));
+    // -------------------------
+    // ROS pubs/subs
+    // -------------------------
+    // Normal control: left/right
+    sub_lr_ = create_subscription<std_msgs::msg::Int16MultiArray>(
+      "/base/wheel_cmd", 10,
+      std::bind(&HardwareNode::on_cmd_lr, this, std::placeholders::_1));
 
-    // Publisher: ticks
+    // Test control: per wheel (fl,fr,rl,rr)
+    // Only used if test_mode_==true, but we can subscribe always; callback ignores when disabled.
+    sub_4_ = create_subscription<std_msgs::msg::Int16MultiArray>(
+      "/base/wheel_cmd4", 10,
+      std::bind(&HardwareNode::on_cmd_4, this, std::placeholders::_1));
+
     pub_ticks_ = create_publisher<base::msg::WheelTicks4>("/base/wheel_ticks4", 10);
 
-    // Open I2C
+    // -------------------------
+    // Init I2C + safety stop
+    // -------------------------
     nxt_ = std::make_unique<NxtServoI2C>(i2c_dev_, i2c_addr_);
     nxt_->open_bus();
-
-    // Accel + stop at startup
     set_acceleration_all(accel_);
     stop_all();
 
-    // Init Phidget encoders
+    // -------------------------
+    // Init encoders
+    // -------------------------
     init_encoders();
 
-    // Watchdog + ticks publisher
+    // -------------------------
+    // Timers
+    // -------------------------
     last_cmd_time_ = now();
     timer_watchdog_ = create_wall_timer(50ms, std::bind(&HardwareNode::watchdog, this));
-
     timer_ticks_ = create_wall_timer(
       std::chrono::milliseconds(publish_ticks_ms_),
       std::bind(&HardwareNode::publish_ticks, this));
 
+    // Print config
     RCLCPP_INFO(get_logger(),
-      "hardware_node started (I2C %s addr 0x%02x, phidget_serial=%d, tick_pub=%dms)",
-      i2c_dev_.c_str(), i2c_addr_, phidget_serial_, publish_ticks_ms_);
+      "hardware_node started | test_mode=%d | I2C %s addr 0x%02x | left=%zu right=%zu | wheel_map_valid=%d [fl=%d fr=%d rl=%d rr=%d]",
+      (int)test_mode_, i2c_dev_.c_str(), i2c_addr_,
+      left_channels_.size(), right_channels_.size(),
+      (int)wheel_channels_valid_,
+      wheel_channels_[0], wheel_channels_[1], wheel_channels_[2], wheel_channels_[3]);
   }
 
   ~HardwareNode() override {
-    // Stop motors on shutdown
     try { stop_all(); } catch (...) {}
 
-    // Close encoders
     for (auto &e : enc_) {
       if (e) {
         Phidget_close((PhidgetHandle)e);
@@ -179,6 +213,9 @@ public:
   }
 
 private:
+  // -------------------------
+  // Helpers (motor)
+  // -------------------------
   static int clamp_int(int v, int lo, int hi) {
     return std::max(lo, std::min(v, hi));
   }
@@ -186,8 +223,7 @@ private:
   int pct_to_pulse_us(int pct) const {
     const double us_f = static_cast<double>(pct) * k_us_per_pct_ + static_cast<double>(neutral_us_);
     int us = static_cast<int>(std::lround(us_f));
-    us = clamp_int(us, min_us_, max_us_);
-    return us;
+    return clamp_int(us, min_us_, max_us_);
   }
 
   void write_channel_pulse(int channel, int pulse_us) {
@@ -213,12 +249,37 @@ private:
     for (int ch : channels) write_channel_pulse(ch, pulse);
   }
 
+  void apply_wheel_channel(int servo_channel, int pct) {
+    pct = clamp_int(pct, pct_min_, pct_max_);
+    const int pulse = pct_to_pulse_us(pct);
+    write_channel_pulse(servo_channel, pulse);
+  }
+
   void stop_all() {
     apply_side(left_channels_,  0);
     apply_side(right_channels_, 0);
   }
 
-  void on_cmd(const std_msgs::msg::Int16MultiArray::SharedPtr msg) {
+  bool derive_wheel_channels_from_sides() {
+    if (left_channels_.size() >= 2 && right_channels_.size() >= 2) {
+      // Convention: [fl, fr, rl, rr] = [left[0], right[0], left[1], right[1]]
+      wheel_channels_[0] = left_channels_[0];
+      wheel_channels_[1] = right_channels_[0];
+      wheel_channels_[2] = left_channels_[1];
+      wheel_channels_[3] = right_channels_[1];
+      return true;
+    }
+    // Fallback to a common default
+    wheel_channels_ = {0, 1, 2, 3};
+    return false;
+  }
+
+  // -------------------------
+  // ROS callbacks
+  // -------------------------
+  void on_cmd_lr(const std_msgs::msg::Int16MultiArray::SharedPtr msg) {
+    // In test mode we ignore left/right commands to prevent accidental coupling
+    if (test_mode_) return;
     if (msg->data.size() < 2) return;
 
     const int left_pct  = clamp_int(static_cast<int>(msg->data[0]), pct_min_, pct_max_);
@@ -229,7 +290,32 @@ private:
       apply_side(right_channels_, right_pct);
       last_cmd_time_ = now();
     } catch (const std::exception& e) {
-      RCLCPP_ERROR(get_logger(), "I2C write failed: %s", e.what());
+      RCLCPP_ERROR(get_logger(), "I2C write failed (LR): %s", e.what());
+    }
+  }
+
+  void on_cmd_4(const std_msgs::msg::Int16MultiArray::SharedPtr msg) {
+    if (!test_mode_) return;
+    if (!wheel_channels_valid_) {
+      // We still can try, but warn once in a while
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+        "test_mode is ON but wheel_channels mapping not validated; set wheel_channels: [fl, fr, rl, rr]");
+    }
+    if (msg->data.size() < 4) return;
+
+    const int fl = clamp_int(static_cast<int>(msg->data[0]), pct_min_, pct_max_);
+    const int fr = clamp_int(static_cast<int>(msg->data[1]), pct_min_, pct_max_);
+    const int rl = clamp_int(static_cast<int>(msg->data[2]), pct_min_, pct_max_);
+    const int rr = clamp_int(static_cast<int>(msg->data[3]), pct_min_, pct_max_);
+
+    try {
+      apply_wheel_channel(wheel_channels_[0], fl);
+      apply_wheel_channel(wheel_channels_[1], fr);
+      apply_wheel_channel(wheel_channels_[2], rl);
+      apply_wheel_channel(wheel_channels_[3], rr);
+      last_cmd_time_ = now();
+    } catch (const std::exception& e) {
+      RCLCPP_ERROR(get_logger(), "I2C write failed (CMD4): %s", e.what());
     }
   }
 
@@ -244,9 +330,9 @@ private:
     }
   }
 
-  // --------- Phidget22 encoder handling ----------
-  // This signature matches your installed phidget22.h:
-  // PhidgetEncoder_OnPositionChangeCallback == void (*)(_PhidgetEncoder*, void*, int, double, int)
+  // -------------------------
+  // Phidget22 encoder handling
+  // -------------------------
   static void CCONV onPositionChangeWithHandle(
       PhidgetEncoderHandle ch,
       void *ctx,
@@ -255,7 +341,6 @@ private:
       int /*indexTriggered*/)
   {
     auto* self = static_cast<HardwareNode*>(ctx);
-
     for (size_t i = 0; i < 4; ++i) {
       if (self->enc_[i] == ch) {
         int64_t delta = static_cast<int64_t>(positionChange);
@@ -282,28 +367,24 @@ private:
           "Phidget_setDeviceSerialNumber");
       }
 
-      // Select channel on the device
       phidget_check(
         Phidget_setChannel((PhidgetHandle)h, encoder_channels_[i]),
         "Phidget_setChannel");
 
-      // Register callback
       phidget_check(
         PhidgetEncoder_setOnPositionChangeHandler(h, &HardwareNode::onPositionChangeWithHandle, this),
         "PhidgetEncoder_setOnPositionChangeHandler");
 
-      // Open and attach
       phidget_check(
         Phidget_openWaitForAttachment((PhidgetHandle)h, 5000),
         "Phidget_openWaitForAttachment");
 
-      // Reset position to 0 (ticks are kept in our atomic counters)
       phidget_check(PhidgetEncoder_setPosition(h, 0), "PhidgetEncoder_setPosition");
 
       enc_[i] = h;
       ticks_[i].store(0, std::memory_order_relaxed);
 
-      RCLCPP_INFO(get_logger(), "Phidget encoder[%zu] attached: channel=%d invert=%d",
+      RCLCPP_INFO(get_logger(), "Encoder[%zu] attached: phidget_channel=%d invert=%d",
                   i, encoder_channels_[i], (int)invert_[i]);
     }
   }
@@ -319,12 +400,18 @@ private:
     pub_ticks_->publish(m);
   }
 
-  // --------- Members ----------
+  // -------------------------
+  // Members
+  // -------------------------
+  // I2C/motor
   std::string i2c_dev_;
   int i2c_addr_{0};
 
   std::vector<int> left_channels_;
   std::vector<int> right_channels_;
+
+  std::array<int,4> wheel_channels_{ {0,1,2,3} };
+  bool wheel_channels_valid_{false};
 
   double k_us_per_pct_{5.5};
   int neutral_us_{1480};
@@ -334,6 +421,8 @@ private:
   int pct_max_{100};
   int accel_{30};
   int watchdog_ms_{300};
+
+  bool test_mode_{false};
 
   // Phidget
   int phidget_serial_{-1};
@@ -349,7 +438,9 @@ private:
   rclcpp::Time last_cmd_time_;
   rclcpp::TimerBase::SharedPtr timer_watchdog_;
   rclcpp::TimerBase::SharedPtr timer_ticks_;
-  rclcpp::Subscription<std_msgs::msg::Int16MultiArray>::SharedPtr sub_;
+
+  rclcpp::Subscription<std_msgs::msg::Int16MultiArray>::SharedPtr sub_lr_;
+  rclcpp::Subscription<std_msgs::msg::Int16MultiArray>::SharedPtr sub_4_;
   rclcpp::Publisher<base::msg::WheelTicks4>::SharedPtr pub_ticks_;
 
   std::unique_ptr<NxtServoI2C> nxt_;
