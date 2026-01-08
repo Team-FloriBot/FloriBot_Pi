@@ -53,7 +53,7 @@ public:
     // Encoder scaling: ticks per wheel revolution used in /base/wheel_ticks4
     ticks_per_rev_  = declare_parameter<int64_t>("ticks_per_rev", 131000);
 
-    // cmd / topics
+    // Topics
     cmd_topic_   = declare_parameter<std::string>("cmd_vel_topic", "/cmd_vel");
     out_topic_   = declare_parameter<std::string>("wheel_cmd_topic", "/base/wheel_cmd");
     ticks_topic_ = declare_parameter<std::string>("wheel_ticks_topic", "/base/wheel_ticks4");
@@ -70,17 +70,21 @@ public:
     cmd_timeout_ms_    = declare_parameter<int>("cmd_timeout_ms", 300);
 
     // Feedforward scaling (open-loop baseline)
-    v_max_mps_         = declare_parameter<double>("v_max_mps", 0.8);
-    use_feedforward_   = declare_parameter<bool>("use_feedforward", true);
+    v_max_mps_       = declare_parameter<double>("v_max_mps", 0.8);
+    use_feedforward_ = declare_parameter<bool>("use_feedforward", true);
 
-    // Deadband
-    v_deadband_mps_    = declare_parameter<double>("v_deadband_mps", 0.02);
+    // Deadbands
+    v_deadband_mps_     = declare_parameter<double>("v_deadband_mps", 0.02);
+    pid_deadband_mps_   = declare_parameter<double>("pid_deadband_mps", 0.01);
 
     // Measurement low-pass filter (0..1). Higher = less filtering.
-    meas_lpf_alpha_    = declare_parameter<double>("meas_lpf_alpha", 0.3);
+    meas_lpf_alpha_  = declare_parameter<double>("meas_lpf_alpha", 0.15);
+
+    // Static friction compensation (minimum percent once moving is requested)
+    min_pwm_pct_ = declare_parameter<int>("min_pwm_pct", 8);
 
     // PID gains (velocity error in m/s -> percent correction)
-    const double kp = declare_parameter<double>("kp", 30.0);
+    const double kp = declare_parameter<double>("kp", 18.0);
     const double ki = declare_parameter<double>("ki", 0.0);
     const double kd = declare_parameter<double>("kd", 0.0);
     const double i_min = declare_parameter<double>("i_min", -50.0);
@@ -109,8 +113,9 @@ public:
       std::bind(&KinematicsNode::controlLoop, this));
 
     RCLCPP_INFO(get_logger(),
-      "KinematicsNode: wheel_base_m=%.3f wheel_radius_m=%.3f ticks_per_rev=%ld ctrl=%dms lpf_alpha=%.3f",
-      wheel_base_m_, wheel_radius_m_, (long)ticks_per_rev_, control_period_ms_, meas_lpf_alpha_);
+      "KinematicsNode: b=%.3f r=%.3f ticks_per_rev=%ld ctrl=%dms kp=%.3f alpha=%.3f min_pwm=%d",
+      wheel_base_m_, wheel_radius_m_, (long)ticks_per_rev_, control_period_ms_,
+      pid_left_.kp, meas_lpf_alpha_, min_pwm_pct_);
   }
 
 private:
@@ -118,6 +123,27 @@ private:
     while (a > M_PI)  a -= 2.0 * M_PI;
     while (a < -M_PI) a += 2.0 * M_PI;
     return a;
+  }
+
+  static double applyDeadband(double x, double db) {
+    if (std::abs(x) <= db) return 0.0;
+    return x;
+  }
+
+  int applyStaticFrictionComp(double u_pct, double v_set) const {
+    // Only apply when motion is requested (avoid pushing when stopped)
+    if (std::abs(v_set) < v_deadband_mps_) return 0;
+
+    // If controller wants exactly 0, keep 0.
+    if (std::abs(u_pct) < 1e-9) return 0;
+
+    const double s = (u_pct >= 0.0) ? 1.0 : -1.0;
+    const double abs_u = std::abs(u_pct);
+
+    if (abs_u < static_cast<double>(min_pwm_pct_)) {
+      return static_cast<int>(std::lround(s * static_cast<double>(min_pwm_pct_)));
+    }
+    return static_cast<int>(std::lround(u_pct));
   }
 
   void onCmd(const geometry_msgs::msg::Twist& t) {
@@ -194,7 +220,7 @@ private:
 
     if (debug_) {
       RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 500,
-        "dTicks fl=%ld fr=%ld rl=%ld rr=%ld | vL=%.3f vR=%.3f (filt vL=%.3f vR=%.3f) | x=%.3f y=%.3f th=%.3f",
+        "dTicks fl=%ld fr=%ld rl=%ld rr=%ld | vL=%.3f vR=%.3f (filt %.3f %.3f) | x=%.3f y=%.3f th=%.3f",
         (long)dfl,(long)dfr,(long)drl,(long)drr,
         v_left_meas_, v_right_meas_, v_left_meas_f_, v_right_meas_f_,
         x_, y_, th_);
@@ -240,7 +266,6 @@ private:
   }
 
   void controlLoop() {
-    // Safety: need cmd and measurement
     const auto timeout = rclcpp::Duration(0, static_cast<int64_t>(cmd_timeout_ms_) * 1000000LL);
     if (!have_cmd_ || !have_meas_ || !have_meas_f_ || (now() - last_cmd_time_) > timeout) {
       pid_left_.reset();
@@ -260,7 +285,6 @@ private:
       return;
     }
 
-    // Use timer period as PID dt
     const double dt_pid = static_cast<double>(control_period_ms_) / 1000.0;
 
     auto ffPct = [this](double v_set){
@@ -268,9 +292,12 @@ private:
       return 100.0 * (v_set / v_max_mps_);
     };
 
-    // Use filtered measurement for error
-    const double eL = vL_set - v_left_meas_f_;
-    const double eR = vR_set - v_right_meas_f_;
+    double eL = vL_set - v_left_meas_f_;
+    double eR = vR_set - v_right_meas_f_;
+
+    // deadband on error to reduce dithering
+    eL = applyDeadband(eL, pid_deadband_mps_);
+    eR = applyDeadband(eR, pid_deadband_mps_);
 
     double uL = ffPct(vL_set) + pid_left_.step(eL, dt_pid);
     double uR = ffPct(vR_set) + pid_right_.step(eR, dt_pid);
@@ -278,7 +305,10 @@ private:
     uL = std::clamp(uL, -100.0, 100.0);
     uR = std::clamp(uR, -100.0, 100.0);
 
-    publishWheelCmd((int)std::lround(uL), (int)std::lround(uR));
+    const int left_pct  = std::clamp(applyStaticFrictionComp(uL, vL_set), -100, 100);
+    const int right_pct = std::clamp(applyStaticFrictionComp(uR, vR_set), -100, 100);
+
+    publishWheelCmd(left_pct, right_pct);
   }
 
   void publishWheelCmd(int left_pct, int right_pct) {
@@ -308,9 +338,12 @@ private:
   int cmd_timeout_ms_{300};
   double v_max_mps_{0.8};
   bool use_feedforward_{true};
-  double v_deadband_mps_{0.02};
 
-  double meas_lpf_alpha_{0.3};
+  double v_deadband_mps_{0.02};
+  double pid_deadband_mps_{0.01};
+
+  double meas_lpf_alpha_{0.15};
+  int min_pwm_pct_{8};
 
   // --- ros ---
   rclcpp::Publisher<std_msgs::msg::Int16MultiArray>::SharedPtr pub_wheel_cmd_;
