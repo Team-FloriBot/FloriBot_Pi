@@ -1,3 +1,4 @@
+// src/nodes/kinematics_node.cpp
 #include <rclcpp/rclcpp.hpp>
 
 #include <geometry_msgs/msg/twist.hpp>
@@ -26,15 +27,18 @@ struct PID {
 
   double step(double e, double dt) {
     if (dt <= 0.0) return 0.0;
+
+    // Integral with clamp
     i += e * dt;
     i = std::clamp(i, i_min, i_max);
 
+    // Derivative on error
     double d = 0.0;
     if (!first) d = (e - prev_e) / dt;
     first = false;
     prev_e = e;
 
-    return kp*e + ki*i + kd*d;
+    return kp * e + ki * i + kd * d;
   }
 };
 
@@ -72,6 +76,9 @@ public:
     // Deadband
     v_deadband_mps_    = declare_parameter<double>("v_deadband_mps", 0.02);
 
+    // Measurement low-pass filter (0..1). Higher = less filtering.
+    meas_lpf_alpha_    = declare_parameter<double>("meas_lpf_alpha", 0.3);
+
     // PID gains (velocity error in m/s -> percent correction)
     const double kp = declare_parameter<double>("kp", 30.0);
     const double ki = declare_parameter<double>("ki", 0.0);
@@ -102,8 +109,8 @@ public:
       std::bind(&KinematicsNode::controlLoop, this));
 
     RCLCPP_INFO(get_logger(),
-      "KinematicsNode: wheel_base_m=%.3f wheel_radius_m=%.3f ticks_per_rev=%ld ctrl=%dms",
-      wheel_base_m_, wheel_radius_m_, (long)ticks_per_rev_, control_period_ms_);
+      "KinematicsNode: wheel_base_m=%.3f wheel_radius_m=%.3f ticks_per_rev=%ld ctrl=%dms lpf_alpha=%.3f",
+      wheel_base_m_, wheel_radius_m_, (long)ticks_per_rev_, control_period_ms_, meas_lpf_alpha_);
   }
 
 private:
@@ -170,14 +177,27 @@ private:
     v_right_meas_ = dr / dt;
     have_meas_ = true;
 
+    // low-pass filter on measured velocities
+    const double a = std::clamp(meas_lpf_alpha_, 0.0, 1.0);
+    if (!have_meas_f_) {
+      v_left_meas_f_ = v_left_meas_;
+      v_right_meas_f_ = v_right_meas_;
+      have_meas_f_ = true;
+    } else {
+      v_left_meas_f_  = a * v_left_meas_  + (1.0 - a) * v_left_meas_f_;
+      v_right_meas_f_ = a * v_right_meas_ + (1.0 - a) * v_right_meas_f_;
+    }
+
     // publish odom
     const double v = ds / dt;
     const double w = dth / dt;
 
     if (debug_) {
       RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 500,
-        "dTicks fl=%ld fr=%ld rl=%ld rr=%ld | vL=%.3f vR=%.3f | x=%.3f y=%.3f th=%.3f",
-        (long)dfl,(long)dfr,(long)drl,(long)drr, v_left_meas_, v_right_meas_, x_, y_, th_);
+        "dTicks fl=%ld fr=%ld rl=%ld rr=%ld | vL=%.3f vR=%.3f (filt vL=%.3f vR=%.3f) | x=%.3f y=%.3f th=%.3f",
+        (long)dfl,(long)dfr,(long)drl,(long)drr,
+        v_left_meas_, v_right_meas_, v_left_meas_f_, v_right_meas_f_,
+        x_, y_, th_);
     }
 
     nav_msgs::msg::Odometry odom;
@@ -222,7 +242,7 @@ private:
   void controlLoop() {
     // Safety: need cmd and measurement
     const auto timeout = rclcpp::Duration(0, static_cast<int64_t>(cmd_timeout_ms_) * 1000000LL);
-    if (!have_cmd_ || !have_meas_ || (now() - last_cmd_time_) > timeout) {
+    if (!have_cmd_ || !have_meas_ || !have_meas_f_ || (now() - last_cmd_time_) > timeout) {
       pid_left_.reset();
       pid_right_.reset();
       publishWheelCmd(0, 0);
@@ -248,8 +268,9 @@ private:
       return 100.0 * (v_set / v_max_mps_);
     };
 
-    const double eL = vL_set - v_left_meas_;
-    const double eR = vR_set - v_right_meas_;
+    // Use filtered measurement for error
+    const double eL = vL_set - v_left_meas_f_;
+    const double eR = vR_set - v_right_meas_f_;
 
     double uL = ffPct(vL_set) + pid_left_.step(eL, dt_pid);
     double uR = ffPct(vR_set) + pid_right_.step(eR, dt_pid);
@@ -289,6 +310,8 @@ private:
   bool use_feedforward_{true};
   double v_deadband_mps_{0.02};
 
+  double meas_lpf_alpha_{0.3};
+
   // --- ros ---
   rclcpp::Publisher<std_msgs::msg::Int16MultiArray>::SharedPtr pub_wheel_cmd_;
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr sub_cmd_;
@@ -306,11 +329,14 @@ private:
 
   // --- measurement state ---
   bool have_meas_{false};
+  bool have_meas_f_{false};
   bool have_last_{false};
   int64_t last_fl_{0}, last_fr_{0}, last_rl_{0}, last_rr_{0};
   rclcpp::Time last_t_;
   double v_left_meas_{0.0};
   double v_right_meas_{0.0};
+  double v_left_meas_f_{0.0};
+  double v_right_meas_f_{0.0};
 
   // --- odom state ---
   double x_{0.0}, y_{0.0}, th_{0.0};
