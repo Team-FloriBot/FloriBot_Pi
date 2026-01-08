@@ -1,66 +1,38 @@
 kinematics_node:
   ros__parameters:
-    # =========================
-    # Topics
-    # =========================
     cmd_vel_topic: /cmd_vel
     wheel_cmd_topic: /base/wheel_cmd
     wheel_ticks_topic: /base/wheel_ticks4
     odom_topic: /odom
 
-    # =========================
-    # Frames
-    # =========================
     odom_frame: odom
     base_frame: base_link
     publish_tf: true
 
-    # =========================
-    # Geometry / scaling
-    # (nach 360°-Radtest ggf. feinjustieren)
-    # =========================
     wheel_base_m: 0.50
     wheel_radius_m: 0.10
     ticks_per_rev: 131000
 
-    # =========================
-    # Control loop & safety
-    # =========================
     control_period_ms: 20
     cmd_timeout_ms: 300
 
-    # =========================
-    # Feedforward (open-loop)
-    # =========================
-    v_max_mps: 0.8
-    use_feedforward: true
+    # NEU in der überarbeiteten Version:
+    ticks_timeout_ms: 120
+    min_ticks_dt_s: 0.005
 
-    # =========================
-    # Deadbands
-    # =========================
+    v_max_mps: 0.8
+    use_feedforward: false   # für ersten Test empfohlen
+
     v_deadband_mps: 0.02
     pid_deadband_mps: 0.01
 
-    # =========================
-    # PID gains (bewusst konservativ)
-    # =========================
     kp: 18.0
     ki: 0.0
     kd: 0.0
     i_min: -50.0
     i_max: 50.0
 
-    # =========================
-    # Measurement filtering
-    # =========================
     meas_lpf_alpha: 0.15
-
-    # =========================
-    # Static friction compensation
-    # =========================
     min_pwm_pct: 8
 
-    # =========================
-    # Debug
-    # =========================
     debug: true
