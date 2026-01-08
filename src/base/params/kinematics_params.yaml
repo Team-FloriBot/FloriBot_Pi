@@ -10,7 +10,7 @@ kinematics_node:
     publish_tf: true
 
     wheel_base_m: 0.50
-    wheel_radius_m: 0.10
+    wheel_radius_m: 0.0979
     ticks_per_rev: 131000
 
     control_period_ms: 20
