@@ -119,7 +119,8 @@ public:
       wheel_channels_valid_ = derive_wheel_channels_from_sides();
     }
 
-    // NEW: per-wheel gains [fl, fr, rl, rr]
+    // Per-wheel gains [fl, fr, rl, rr]
+    // For closed-loop control in kinematics_node, keep these at 1.0 (or ignore them).
     const auto gains =
       declare_parameter<std::vector<double>>(
         "wheel_gains", std::vector<double>{1.0, 1.0, 1.0, 1.0});
@@ -130,6 +131,9 @@ public:
       wheel_gains_[i] = gains[i];
     }
 
+    // NEW: allow ignoring wheel_gains in normal operation (recommended for kinematics closed-loop)
+    ignore_wheel_gains_ = declare_parameter<bool>("ignore_wheel_gains", true);
+
     // PWM mapping: us = pct*k + neutral
     k_us_per_pct_ = declare_parameter<double>("k_us_per_pct", 5.5);
     neutral_us_   = declare_parameter<int>("neutral_us", 1480);
@@ -139,7 +143,9 @@ public:
     pct_min_ = declare_parameter<int>("pct_min", -100);
     pct_max_ = declare_parameter<int>("pct_max",  100);
 
-    accel_ = declare_parameter<int>("acceleration", 30);
+    // For velocity closed-loop, prefer accel=0 (no hidden actuator ramp).
+    accel_ = declare_parameter<int>("acceleration", 0);
+
     watchdog_ms_ = declare_parameter<int>("watchdog_timeout_ms", 300);
 
     // Test mode: if true, subscribe to /base/wheel_cmd4 and allow per-wheel actuation
@@ -200,11 +206,12 @@ public:
       std::bind(&HardwareNode::publish_ticks, this));
 
     RCLCPP_INFO(get_logger(),
-      "hardware_node started | test_mode=%d | I2C %s addr 0x%02x | wheel_map_valid=%d [fl=%d fr=%d rl=%d rr=%d] | gains [%.3f %.3f %.3f %.3f]",
+      "hardware_node started | test_mode=%d | I2C %s addr 0x%02x | wheel_map_valid=%d [fl=%d fr=%d rl=%d rr=%d] | gains [%.3f %.3f %.3f %.3f] ignore_wheel_gains=%d accel=%d",
       (int)test_mode_, i2c_dev_.c_str(), i2c_addr_,
       (int)wheel_channels_valid_,
       wheel_channels_[0], wheel_channels_[1], wheel_channels_[2], wheel_channels_[3],
-      wheel_gains_[0], wheel_gains_[1], wheel_gains_[2], wheel_gains_[3]);
+      wheel_gains_[0], wheel_gains_[1], wheel_gains_[2], wheel_gains_[3],
+      (int)ignore_wheel_gains_, accel_);
   }
 
   ~HardwareNode() override {
@@ -291,13 +298,20 @@ private:
     if (test_mode_) return;
     if (msg->data.size() < 2) return;
 
-    const int left_pct  = clamp_int((int)msg->data[0], pct_min_, pct_max_);
-    const int right_pct = clamp_int((int)msg->data[1], pct_min_, pct_max_);
+    const int left_pct_in  = clamp_int((int)msg->data[0], pct_min_, pct_max_);
+    const int right_pct_in = clamp_int((int)msg->data[1], pct_min_, pct_max_);
 
-    const int fl = apply_gain(left_pct,  wheel_gains_[0]);
-    const int fr = apply_gain(right_pct, wheel_gains_[1]);
-    const int rl = apply_gain(left_pct,  wheel_gains_[2]);
-    const int rr = apply_gain(right_pct, wheel_gains_[3]);
+    int fl = left_pct_in;
+    int fr = right_pct_in;
+    int rl = left_pct_in;
+    int rr = right_pct_in;
+
+    if (!ignore_wheel_gains_) {
+      fl = apply_gain(left_pct_in,  wheel_gains_[0]);
+      fr = apply_gain(right_pct_in, wheel_gains_[1]);
+      rl = apply_gain(left_pct_in,  wheel_gains_[2]);
+      rr = apply_gain(right_pct_in, wheel_gains_[3]);
+    }
 
     try {
       apply_wheel_channel(wheel_channels_[0], fl);
@@ -314,10 +328,17 @@ private:
     if (!test_mode_) return;
     if (msg->data.size() < 4) return;
 
-    const int fl = clamp_int((int)msg->data[0], pct_min_, pct_max_);
-    const int fr = clamp_int((int)msg->data[1], pct_min_, pct_max_);
-    const int rl = clamp_int((int)msg->data[2], pct_min_, pct_max_);
-    const int rr = clamp_int((int)msg->data[3], pct_min_, pct_max_);
+    int fl = clamp_int((int)msg->data[0], pct_min_, pct_max_);
+    int fr = clamp_int((int)msg->data[1], pct_min_, pct_max_);
+    int rl = clamp_int((int)msg->data[2], pct_min_, pct_max_);
+    int rr = clamp_int((int)msg->data[3], pct_min_, pct_max_);
+
+    if (!ignore_wheel_gains_) {
+      fl = apply_gain(fl, wheel_gains_[0]);
+      fr = apply_gain(fr, wheel_gains_[1]);
+      rl = apply_gain(rl, wheel_gains_[2]);
+      rr = apply_gain(rr, wheel_gains_[3]);
+    }
 
     try {
       apply_wheel_channel(wheel_channels_[0], fl);
@@ -425,6 +446,7 @@ private:
   bool wheel_channels_valid_{false};
 
   std::array<double,4> wheel_gains_{ {1.0, 1.0, 1.0, 1.0} }; // fl, fr, rl, rr
+  bool ignore_wheel_gains_{true};
 
   double k_us_per_pct_{5.5};
   int neutral_us_{1480};
@@ -432,7 +454,7 @@ private:
   int max_us_{2100};
   int pct_min_{-100};
   int pct_max_{100};
-  int accel_{30};
+  int accel_{0};
   int watchdog_ms_{300};
 
   bool test_mode_{false};
