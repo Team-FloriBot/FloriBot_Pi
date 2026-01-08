@@ -1,8 +1,10 @@
+// src/nodes/hardware_node.cpp
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/int16_multi_array.hpp>
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -91,7 +93,6 @@ public:
     i2c_dev_  = declare_parameter<std::string>("i2c_dev", "/dev/i2c-1");
     i2c_addr_ = declare_parameter<int>("i2c_addr", 0x58);
 
-    // Vector params should be int64_t in ROS parameters
     const auto left_i64  =
         declare_parameter<std::vector<int64_t>>("left_channels",  std::vector<int64_t>{0, 2});
     const auto right_i64 =
@@ -101,33 +102,28 @@ public:
     for (auto v : left_i64)  left_channels_.push_back(static_cast<int>(v));
     for (auto v : right_i64) right_channels_.push_back(static_cast<int>(v));
 
-    // PWM mapping: us = speed*5.5 + 1480
+    // PWM mapping: us = pct*5.5 + 1480
     k_us_per_pct_ = declare_parameter<double>("k_us_per_pct", 5.5);
     neutral_us_   = declare_parameter<int>("neutral_us", 1480);
     min_us_       = declare_parameter<int>("min_us", 900);
     max_us_       = declare_parameter<int>("max_us", 2100);
 
-    // speed clamp
     pct_min_ = declare_parameter<int>("pct_min", -100);
     pct_max_ = declare_parameter<int>("pct_max",  100);
 
-    // acceleration register (0..255)
     accel_ = declare_parameter<int>("acceleration", 30);
-
     watchdog_ms_ = declare_parameter<int>("watchdog_timeout_ms", 300);
 
     // --- Encoder (Phidget22) params ---
-    // If you have only one device: leave -1 (any)
     phidget_serial_ = declare_parameter<int>("phidget_serial", -1);
 
-    // Which Phidget channels correspond to wheels (fl, fr, rl, rr)
-    // default assumes: channel 0=fl, 1=fr, 2=rl, 3=rr
+    // [fl, fr, rl, rr] -> Phidget channel numbers
     const auto enc_map_i64 =
         declare_parameter<std::vector<int64_t>>("encoder_channels", std::vector<int64_t>{0,1,2,3});
     if (enc_map_i64.size() != 4) {
-      throw std::runtime_error("encoder_channels must have 4 entries (fl,fr,rl,rr)");
+      throw std::runtime_error("encoder_channels must have 4 entries: [fl, fr, rl, rr]");
     }
-    for (size_t i=0;i<4;i++) encoder_channels_[i] = static_cast<int>(enc_map_i64[i]);
+    for (size_t i = 0; i < 4; ++i) encoder_channels_[i] = static_cast<int>(enc_map_i64[i]);
 
     invert_fl_ = declare_parameter<bool>("invert_fl", false);
     invert_fr_ = declare_parameter<bool>("invert_fr", false);
@@ -136,25 +132,26 @@ public:
 
     publish_ticks_ms_ = declare_parameter<int>("publish_ticks_ms", 20);
 
-    // Subscriber (motor command)
+    // Subscriber: motor cmd
     sub_ = create_subscription<std_msgs::msg::Int16MultiArray>(
         "/base/wheel_cmd", 10,
         std::bind(&HardwareNode::on_cmd, this, std::placeholders::_1));
 
-    // Publisher (ticks)
+    // Publisher: ticks
     pub_ticks_ = create_publisher<base::msg::WheelTicks4>("/base/wheel_ticks4", 10);
 
     // Open I2C
     nxt_ = std::make_unique<NxtServoI2C>(i2c_dev_, i2c_addr_);
     nxt_->open_bus();
 
-    // Apply acceleration and force STOP at startup (safety)
+    // Accel + stop at startup
     set_acceleration_all(accel_);
     stop_all();
 
-    // Init Phidgets
+    // Init Phidget encoders
     init_encoders();
 
+    // Watchdog + ticks publisher
     last_cmd_time_ = now();
     timer_watchdog_ = create_wall_timer(50ms, std::bind(&HardwareNode::watchdog, this));
 
@@ -163,7 +160,7 @@ public:
       std::bind(&HardwareNode::publish_ticks, this));
 
     RCLCPP_INFO(get_logger(),
-      "hardware_node started (I2C %s addr 0x%02x, Phidget serial=%d, tick_pub=%dms)",
+      "hardware_node started (I2C %s addr 0x%02x, phidget_serial=%d, tick_pub=%dms)",
       i2c_dev_.c_str(), i2c_addr_, phidget_serial_, publish_ticks_ms_);
   }
 
@@ -248,24 +245,22 @@ private:
   }
 
   // --------- Phidget22 encoder handling ----------
-  static void CCONV onPositionChange(PhidgetEncoderHandle /*ch*/, void *ctx, int64_t positionChange, double /*timeChange*/) {
+  // This signature matches your installed phidget22.h:
+  // PhidgetEncoder_OnPositionChangeCallback == void (*)(_PhidgetEncoder*, void*, int, double, int)
+  static void CCONV onPositionChangeWithHandle(
+      PhidgetEncoderHandle ch,
+      void *ctx,
+      int positionChange,
+      double /*timeChange*/,
+      int /*indexTriggered*/)
+  {
     auto* self = static_cast<HardwareNode*>(ctx);
-    // Determine which encoder fired by scanning handles (only 4, so OK)
-    // Accumulate delta ticks
-    // NOTE: positionChange is signed
-    for (size_t i = 0; i < 4; ++i) {
-      // We cannot compare handle here without the handle parameter. If needed, change signature to accept ch and compare.
-    }
-    (void)positionChange;
-  }
 
-  static void CCONV onPositionChangeWithHandle(PhidgetEncoderHandle ch, void *ctx, int64_t positionChange, double /*timeChange*/) {
-    auto* self = static_cast<HardwareNode*>(ctx);
     for (size_t i = 0; i < 4; ++i) {
       if (self->enc_[i] == ch) {
-        // Apply per-wheel inversion
-        const int64_t delta = self->invert_[i] ? -positionChange : positionChange;
-        self->ticks_[i] += delta;
+        int64_t delta = static_cast<int64_t>(positionChange);
+        if (self->invert_[i]) delta = -delta;
+        self->ticks_[i].fetch_add(delta, std::memory_order_relaxed);
         return;
       }
     }
@@ -282,27 +277,33 @@ private:
       phidget_check(PhidgetEncoder_create(&h), "PhidgetEncoder_create");
 
       if (phidget_serial_ >= 0) {
-        phidget_check(Phidget_setDeviceSerialNumber((PhidgetHandle)h, phidget_serial_), "Phidget_setDeviceSerialNumber");
+        phidget_check(
+          Phidget_setDeviceSerialNumber((PhidgetHandle)h, phidget_serial_),
+          "Phidget_setDeviceSerialNumber");
       }
 
-      // Channel on device
-      phidget_check(Phidget_setChannel((PhidgetHandle)h, encoder_channels_[i]), "Phidget_setChannel");
+      // Select channel on the device
+      phidget_check(
+        Phidget_setChannel((PhidgetHandle)h, encoder_channels_[i]),
+        "Phidget_setChannel");
 
-      // Optional: set hub port / isHubPortDevice if needed (leave default unless required)
-
-      phidget_check(PhidgetEncoder_setOnPositionChangeHandler(h, &HardwareNode::onPositionChangeWithHandle, this),
-                    "PhidgetEncoder_setOnPositionChangeHandler");
+      // Register callback
+      phidget_check(
+        PhidgetEncoder_setOnPositionChangeHandler(h, &HardwareNode::onPositionChangeWithHandle, this),
+        "PhidgetEncoder_setOnPositionChangeHandler");
 
       // Open and attach
-      phidget_check(Phidget_openWaitForAttachment((PhidgetHandle)h, 5000), "Phidget_openWaitForAttachment");
+      phidget_check(
+        Phidget_openWaitForAttachment((PhidgetHandle)h, 5000),
+        "Phidget_openWaitForAttachment");
 
-      // Reset position to 0 so ticks start at 0
+      // Reset position to 0 (ticks are kept in our atomic counters)
       phidget_check(PhidgetEncoder_setPosition(h, 0), "PhidgetEncoder_setPosition");
 
       enc_[i] = h;
-      ticks_[i] = 0;
+      ticks_[i].store(0, std::memory_order_relaxed);
 
-      RCLCPP_INFO(get_logger(), "Phidget encoder %zu attached: channel=%d invert=%d",
+      RCLCPP_INFO(get_logger(), "Phidget encoder[%zu] attached: channel=%d invert=%d",
                   i, encoder_channels_[i], (int)invert_[i]);
     }
   }
@@ -311,10 +312,10 @@ private:
     base::msg::WheelTicks4 m;
     m.header.stamp = now();
     m.header.frame_id = "base_link";
-    m.fl_ticks = ticks_[0];
-    m.fr_ticks = ticks_[1];
-    m.rl_ticks = ticks_[2];
-    m.rr_ticks = ticks_[3];
+    m.fl_ticks = ticks_[0].load(std::memory_order_relaxed);
+    m.fr_ticks = ticks_[1].load(std::memory_order_relaxed);
+    m.rl_ticks = ticks_[2].load(std::memory_order_relaxed);
+    m.rr_ticks = ticks_[3].load(std::memory_order_relaxed);
     pub_ticks_->publish(m);
   }
 
@@ -334,20 +335,20 @@ private:
   int accel_{30};
   int watchdog_ms_{300};
 
+  // Phidget
   int phidget_serial_{-1};
   std::array<int,4> encoder_channels_{ {0,1,2,3} };
   std::array<bool,4> invert_{ {false,false,false,false} };
   bool invert_fl_{false}, invert_fr_{false}, invert_rl_{false}, invert_rr_{false};
   int publish_ticks_ms_{20};
 
-  // Encoder handles and tick counters
   std::array<PhidgetEncoderHandle,4> enc_{ {nullptr,nullptr,nullptr,nullptr} };
-  std::array<int64_t,4> ticks_{ {0,0,0,0} };
+  std::array<std::atomic<int64_t>,4> ticks_{};
 
+  // ROS
   rclcpp::Time last_cmd_time_;
   rclcpp::TimerBase::SharedPtr timer_watchdog_;
   rclcpp::TimerBase::SharedPtr timer_ticks_;
-
   rclcpp::Subscription<std_msgs::msg::Int16MultiArray>::SharedPtr sub_;
   rclcpp::Publisher<base::msg::WheelTicks4>::SharedPtr pub_ticks_;
 
