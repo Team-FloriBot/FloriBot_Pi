@@ -53,7 +53,7 @@ hardware_node:
     # Richtung invertieren (Vorwärtsdrehen soll positiv zählen)
     invert_fl: true
     invert_fr: false
-    invert_rl: false
+    invert_rl: true
     invert_rr: false
 
     # Publish-Rate für /base/wheel_ticks4
