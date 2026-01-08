@@ -21,7 +21,7 @@ hardware_node:
     # Per-wheel gain (Encoder-basierte Feinabstimmung)
     # Reihenfolge: [fl, fr, rl, rr]
     # =========================================================
-    wheel_gains: [0.95, 1.08, 1.08, 0.92]
+    wheel_gains: [0.94, 1.10, 1.08, 0.91]
 
     # =========================================================
     # PWM / Servo mapping
