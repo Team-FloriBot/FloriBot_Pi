@@ -93,9 +93,9 @@ public:
     i2c_addr_ = declare_parameter<int>("i2c_addr", 0x58);
 
     const auto left_i64 =
-      declare_parameter<std::vector<int64_t>>("left_channels",  std::vector<int64_t>{0, 2});
+      declare_parameter<std::vector<int64_t>>("left_channels",  std::vector<int64_t>{2, 0});
     const auto right_i64 =
-      declare_parameter<std::vector<int64_t>>("right_channels", std::vector<int64_t>{1, 3});
+      declare_parameter<std::vector<int64_t>>("right_channels", std::vector<int64_t>{3, 1});
 
     left_channels_.clear();
     right_channels_.clear();
@@ -105,7 +105,7 @@ public:
     // Optional: explicit wheel->servo channel mapping for test mode: [fl, fr, rl, rr]
     // If not provided, we derive from left/right: [left[0], right[0], left[1], right[1]]
     const auto wheel_i64 =
-      declare_parameter<std::vector<int64_t>>("wheel_channels", std::vector<int64_t>{});
+      declare_parameter<std::vector<int64_t>>("wheel_channels", std::vector<int64_t>{2, 3, 0, 1});
     if (!wheel_i64.empty()) {
       if (wheel_i64.size() != 4) {
         throw std::runtime_error("wheel_channels must be 4 entries: [fl, fr, rl, rr]");
@@ -117,6 +117,17 @@ public:
       wheel_channels_valid_ = true;
     } else {
       wheel_channels_valid_ = derive_wheel_channels_from_sides();
+    }
+
+    // NEW: per-wheel gains [fl, fr, rl, rr]
+    const auto gains =
+      declare_parameter<std::vector<double>>(
+        "wheel_gains", std::vector<double>{1.0, 1.0, 1.0, 1.0});
+    if (gains.size() != 4) {
+      throw std::runtime_error("wheel_gains must have 4 entries: [fl, fr, rl, rr]");
+    }
+    for (size_t i = 0; i < 4; ++i) {
+      wheel_gains_[i] = gains[i];
     }
 
     // PWM mapping: us = pct*k + neutral
@@ -140,15 +151,15 @@ public:
     phidget_serial_ = declare_parameter<int>("phidget_serial", -1);
 
     const auto enc_map_i64 =
-      declare_parameter<std::vector<int64_t>>("encoder_channels", std::vector<int64_t>{0, 1, 2, 3});
+      declare_parameter<std::vector<int64_t>>("encoder_channels", std::vector<int64_t>{2, 3, 0, 1});
     if (enc_map_i64.size() != 4) {
       throw std::runtime_error("encoder_channels must have 4 entries: [fl, fr, rl, rr]");
     }
     for (size_t i = 0; i < 4; ++i) encoder_channels_[i] = static_cast<int>(enc_map_i64[i]);
 
-    invert_fl_ = declare_parameter<bool>("invert_fl", false);
+    invert_fl_ = declare_parameter<bool>("invert_fl", true);
     invert_fr_ = declare_parameter<bool>("invert_fr", false);
-    invert_rl_ = declare_parameter<bool>("invert_rl", false);
+    invert_rl_ = declare_parameter<bool>("invert_rl", true);
     invert_rr_ = declare_parameter<bool>("invert_rr", false);
 
     publish_ticks_ms_ = declare_parameter<int>("publish_ticks_ms", 20);
@@ -156,13 +167,10 @@ public:
     // -------------------------
     // ROS pubs/subs
     // -------------------------
-    // Normal control: left/right
     sub_lr_ = create_subscription<std_msgs::msg::Int16MultiArray>(
       "/base/wheel_cmd", 10,
       std::bind(&HardwareNode::on_cmd_lr, this, std::placeholders::_1));
 
-    // Test control: per wheel (fl,fr,rl,rr)
-    // Only used if test_mode_==true, but we can subscribe always; callback ignores when disabled.
     sub_4_ = create_subscription<std_msgs::msg::Int16MultiArray>(
       "/base/wheel_cmd4", 10,
       std::bind(&HardwareNode::on_cmd_4, this, std::placeholders::_1));
@@ -191,13 +199,12 @@ public:
       std::chrono::milliseconds(publish_ticks_ms_),
       std::bind(&HardwareNode::publish_ticks, this));
 
-    // Print config
     RCLCPP_INFO(get_logger(),
-      "hardware_node started | test_mode=%d | I2C %s addr 0x%02x | left=%zu right=%zu | wheel_map_valid=%d [fl=%d fr=%d rl=%d rr=%d]",
+      "hardware_node started | test_mode=%d | I2C %s addr 0x%02x | wheel_map_valid=%d [fl=%d fr=%d rl=%d rr=%d] | gains [%.3f %.3f %.3f %.3f]",
       (int)test_mode_, i2c_dev_.c_str(), i2c_addr_,
-      left_channels_.size(), right_channels_.size(),
       (int)wheel_channels_valid_,
-      wheel_channels_[0], wheel_channels_[1], wheel_channels_[2], wheel_channels_[3]);
+      wheel_channels_[0], wheel_channels_[1], wheel_channels_[2], wheel_channels_[3],
+      wheel_gains_[0], wheel_gains_[1], wheel_gains_[2], wheel_gains_[3]);
   }
 
   ~HardwareNode() override {
@@ -218,6 +225,11 @@ private:
   // -------------------------
   static int clamp_int(int v, int lo, int hi) {
     return std::max(lo, std::min(v, hi));
+  }
+
+  int apply_gain(int pct, double gain) const {
+    const double p = static_cast<double>(pct) * gain;
+    return clamp_int(static_cast<int>(std::lround(p)), pct_min_, pct_max_);
   }
 
   int pct_to_pulse_us(int pct) const {
@@ -262,14 +274,12 @@ private:
 
   bool derive_wheel_channels_from_sides() {
     if (left_channels_.size() >= 2 && right_channels_.size() >= 2) {
-      // Convention: [fl, fr, rl, rr] = [left[0], right[0], left[1], right[1]]
       wheel_channels_[0] = left_channels_[0];
       wheel_channels_[1] = right_channels_[0];
       wheel_channels_[2] = left_channels_[1];
       wheel_channels_[3] = right_channels_[1];
       return true;
     }
-    // Fallback to a common default
     wheel_channels_ = {0, 1, 2, 3};
     return false;
   }
@@ -278,16 +288,22 @@ private:
   // ROS callbacks
   // -------------------------
   void on_cmd_lr(const std_msgs::msg::Int16MultiArray::SharedPtr msg) {
-    // In test mode we ignore left/right commands to prevent accidental coupling
     if (test_mode_) return;
     if (msg->data.size() < 2) return;
 
-    const int left_pct  = clamp_int(static_cast<int>(msg->data[0]), pct_min_, pct_max_);
-    const int right_pct = clamp_int(static_cast<int>(msg->data[1]), pct_min_, pct_max_);
+    const int left_pct  = clamp_int((int)msg->data[0], pct_min_, pct_max_);
+    const int right_pct = clamp_int((int)msg->data[1], pct_min_, pct_max_);
+
+    const int fl = apply_gain(left_pct,  wheel_gains_[0]);
+    const int fr = apply_gain(right_pct, wheel_gains_[1]);
+    const int rl = apply_gain(left_pct,  wheel_gains_[2]);
+    const int rr = apply_gain(right_pct, wheel_gains_[3]);
 
     try {
-      apply_side(left_channels_,  left_pct);
-      apply_side(right_channels_, right_pct);
+      apply_wheel_channel(wheel_channels_[0], fl);
+      apply_wheel_channel(wheel_channels_[1], fr);
+      apply_wheel_channel(wheel_channels_[2], rl);
+      apply_wheel_channel(wheel_channels_[3], rr);
       last_cmd_time_ = now();
     } catch (const std::exception& e) {
       RCLCPP_ERROR(get_logger(), "I2C write failed (LR): %s", e.what());
@@ -296,17 +312,12 @@ private:
 
   void on_cmd_4(const std_msgs::msg::Int16MultiArray::SharedPtr msg) {
     if (!test_mode_) return;
-    if (!wheel_channels_valid_) {
-      // We still can try, but warn once in a while
-      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
-        "test_mode is ON but wheel_channels mapping not validated; set wheel_channels: [fl, fr, rl, rr]");
-    }
     if (msg->data.size() < 4) return;
 
-    const int fl = clamp_int(static_cast<int>(msg->data[0]), pct_min_, pct_max_);
-    const int fr = clamp_int(static_cast<int>(msg->data[1]), pct_min_, pct_max_);
-    const int rl = clamp_int(static_cast<int>(msg->data[2]), pct_min_, pct_max_);
-    const int rr = clamp_int(static_cast<int>(msg->data[3]), pct_min_, pct_max_);
+    const int fl = clamp_int((int)msg->data[0], pct_min_, pct_max_);
+    const int fr = clamp_int((int)msg->data[1], pct_min_, pct_max_);
+    const int rl = clamp_int((int)msg->data[2], pct_min_, pct_max_);
+    const int rr = clamp_int((int)msg->data[3], pct_min_, pct_max_);
 
     try {
       apply_wheel_channel(wheel_channels_[0], fl);
@@ -410,8 +421,10 @@ private:
   std::vector<int> left_channels_;
   std::vector<int> right_channels_;
 
-  std::array<int,4> wheel_channels_{ {0,1,2,3} };
+  std::array<int,4> wheel_channels_{ {2, 3, 0, 1} };
   bool wheel_channels_valid_{false};
+
+  std::array<double,4> wheel_gains_{ {1.0, 1.0, 1.0, 1.0} }; // fl, fr, rl, rr
 
   double k_us_per_pct_{5.5};
   int neutral_us_{1480};
@@ -426,9 +439,9 @@ private:
 
   // Phidget
   int phidget_serial_{-1};
-  std::array<int,4> encoder_channels_{ {0,1,2,3} };
+  std::array<int,4> encoder_channels_{ {2, 3, 0, 1} };
   std::array<bool,4> invert_{ {false,false,false,false} };
-  bool invert_fl_{false}, invert_fr_{false}, invert_rl_{false}, invert_rr_{false};
+  bool invert_fl_{true}, invert_fr_{false}, invert_rl_{true}, invert_rr_{false};
   int publish_ticks_ms_{20};
 
   std::array<PhidgetEncoderHandle,4> enc_{ {nullptr,nullptr,nullptr,nullptr} };
