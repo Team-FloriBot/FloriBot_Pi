@@ -2,9 +2,11 @@
 #include <std_msgs/msg/int16_multi_array.hpp>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -14,6 +16,11 @@
 #include <linux/i2c-dev.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
+
+// Phidget22
+#include <phidget22.h>
+
+#include "base/msg/wheel_ticks4.hpp"
 
 using namespace std::chrono_literals;
 
@@ -68,10 +75,19 @@ private:
   int fd_{-1};
 };
 
+static void phidget_check(PhidgetReturnCode rc, const char* what) {
+  if (rc != EPHIDGET_OK) {
+    const char* err = nullptr;
+    Phidget_getErrorDescription(rc, &err);
+    std::string msg = std::string(what) + " failed: " + (err ? err : "unknown");
+    throw std::runtime_error(msg);
+  }
+}
+
 class HardwareNode : public rclcpp::Node {
 public:
   HardwareNode() : Node("hardware_node") {
-    // --- Parameters (defaults according to seminar docs) ---
+    // --- I2C params ---
     i2c_dev_  = declare_parameter<std::string>("i2c_dev", "/dev/i2c-1");
     i2c_addr_ = declare_parameter<int>("i2c_addr", 0x58);
 
@@ -100,10 +116,33 @@ public:
 
     watchdog_ms_ = declare_parameter<int>("watchdog_timeout_ms", 300);
 
-    // Subscriber
+    // --- Encoder (Phidget22) params ---
+    // If you have only one device: leave -1 (any)
+    phidget_serial_ = declare_parameter<int>("phidget_serial", -1);
+
+    // Which Phidget channels correspond to wheels (fl, fr, rl, rr)
+    // default assumes: channel 0=fl, 1=fr, 2=rl, 3=rr
+    const auto enc_map_i64 =
+        declare_parameter<std::vector<int64_t>>("encoder_channels", std::vector<int64_t>{0,1,2,3});
+    if (enc_map_i64.size() != 4) {
+      throw std::runtime_error("encoder_channels must have 4 entries (fl,fr,rl,rr)");
+    }
+    for (size_t i=0;i<4;i++) encoder_channels_[i] = static_cast<int>(enc_map_i64[i]);
+
+    invert_fl_ = declare_parameter<bool>("invert_fl", false);
+    invert_fr_ = declare_parameter<bool>("invert_fr", false);
+    invert_rl_ = declare_parameter<bool>("invert_rl", false);
+    invert_rr_ = declare_parameter<bool>("invert_rr", false);
+
+    publish_ticks_ms_ = declare_parameter<int>("publish_ticks_ms", 20);
+
+    // Subscriber (motor command)
     sub_ = create_subscription<std_msgs::msg::Int16MultiArray>(
         "/base/wheel_cmd", 10,
         std::bind(&HardwareNode::on_cmd, this, std::placeholders::_1));
+
+    // Publisher (ticks)
+    pub_ticks_ = create_publisher<base::msg::WheelTicks4>("/base/wheel_ticks4", 10);
 
     // Open I2C
     nxt_ = std::make_unique<NxtServoI2C>(i2c_dev_, i2c_addr_);
@@ -113,11 +152,33 @@ public:
     set_acceleration_all(accel_);
     stop_all();
 
-    last_cmd_time_ = now();
-    timer_ = create_wall_timer(50ms, std::bind(&HardwareNode::watchdog, this));
+    // Init Phidgets
+    init_encoders();
 
-    RCLCPP_INFO(get_logger(), "hardware_node started (I2C %s addr 0x%02x)",
-                i2c_dev_.c_str(), i2c_addr_);
+    last_cmd_time_ = now();
+    timer_watchdog_ = create_wall_timer(50ms, std::bind(&HardwareNode::watchdog, this));
+
+    timer_ticks_ = create_wall_timer(
+      std::chrono::milliseconds(publish_ticks_ms_),
+      std::bind(&HardwareNode::publish_ticks, this));
+
+    RCLCPP_INFO(get_logger(),
+      "hardware_node started (I2C %s addr 0x%02x, Phidget serial=%d, tick_pub=%dms)",
+      i2c_dev_.c_str(), i2c_addr_, phidget_serial_, publish_ticks_ms_);
+  }
+
+  ~HardwareNode() override {
+    // Stop motors on shutdown
+    try { stop_all(); } catch (...) {}
+
+    // Close encoders
+    for (auto &e : enc_) {
+      if (e) {
+        Phidget_close((PhidgetHandle)e);
+        PhidgetEncoder_delete(&e);
+        e = nullptr;
+      }
+    }
   }
 
 private:
@@ -126,7 +187,6 @@ private:
   }
 
   int pct_to_pulse_us(int pct) const {
-    // pct -> us
     const double us_f = static_cast<double>(pct) * k_us_per_pct_ + static_cast<double>(neutral_us_);
     int us = static_cast<int>(std::lround(us_f));
     us = clamp_int(us, min_us_, max_us_);
@@ -134,7 +194,6 @@ private:
   }
 
   void write_channel_pulse(int channel, int pulse_us) {
-    // reg = (channel*2) + 66 ; write low/high
     const uint8_t reg  = static_cast<uint8_t>((channel * 2) + 66);
     const uint8_t low  = static_cast<uint8_t>(pulse_us & 0xFF);
     const uint8_t high = static_cast<uint8_t>((pulse_us >> 8) & 0xFF);
@@ -142,25 +201,19 @@ private:
   }
 
   void set_acceleration(int channel, int accel) {
-    // reg = channel + 82 ; write 1 byte
     const uint8_t reg = static_cast<uint8_t>(channel + 82);
     nxt_->write1(reg, static_cast<uint8_t>(accel));
   }
 
   void set_acceleration_all(int accel) {
     accel = clamp_int(accel, 0, 255);
-    // In your documented setup only channels 0..3 are used for drive
-    for (int ch = 0; ch < 4; ++ch) {
-      set_acceleration(ch, accel);
-    }
+    for (int ch = 0; ch < 4; ++ch) set_acceleration(ch, accel);
   }
 
   void apply_side(const std::vector<int>& channels, int pct) {
     pct = clamp_int(pct, pct_min_, pct_max_);
     const int pulse = pct_to_pulse_us(pct);
-    for (int ch : channels) {
-      write_channel_pulse(ch, pulse);
-    }
+    for (int ch : channels) write_channel_pulse(ch, pulse);
   }
 
   void stop_all() {
@@ -171,7 +224,6 @@ private:
   void on_cmd(const std_msgs::msg::Int16MultiArray::SharedPtr msg) {
     if (msg->data.size() < 2) return;
 
-    // msg->data are int16 -> cast to int before clamp
     const int left_pct  = clamp_int(static_cast<int>(msg->data[0]), pct_min_, pct_max_);
     const int right_pct = clamp_int(static_cast<int>(msg->data[1]), pct_min_, pct_max_);
 
@@ -188,15 +240,85 @@ private:
     const auto dt = now() - last_cmd_time_;
     const auto timeout = rclcpp::Duration(0, static_cast<int64_t>(watchdog_ms_) * 1000000LL);
     if (dt > timeout) {
-      try {
-        stop_all();
-      } catch (const std::exception& e) {
+      try { stop_all(); } catch (const std::exception& e) {
         RCLCPP_ERROR(get_logger(), "Watchdog stop failed: %s", e.what());
       }
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "Watchdog timeout -> STOP");
     }
   }
 
+  // --------- Phidget22 encoder handling ----------
+  static void CCONV onPositionChange(PhidgetEncoderHandle /*ch*/, void *ctx, int64_t positionChange, double /*timeChange*/) {
+    auto* self = static_cast<HardwareNode*>(ctx);
+    // Determine which encoder fired by scanning handles (only 4, so OK)
+    // Accumulate delta ticks
+    // NOTE: positionChange is signed
+    for (size_t i = 0; i < 4; ++i) {
+      // We cannot compare handle here without the handle parameter. If needed, change signature to accept ch and compare.
+    }
+    (void)positionChange;
+  }
+
+  static void CCONV onPositionChangeWithHandle(PhidgetEncoderHandle ch, void *ctx, int64_t positionChange, double /*timeChange*/) {
+    auto* self = static_cast<HardwareNode*>(ctx);
+    for (size_t i = 0; i < 4; ++i) {
+      if (self->enc_[i] == ch) {
+        // Apply per-wheel inversion
+        const int64_t delta = self->invert_[i] ? -positionChange : positionChange;
+        self->ticks_[i] += delta;
+        return;
+      }
+    }
+  }
+
+  void init_encoders() {
+    invert_[0] = invert_fl_;
+    invert_[1] = invert_fr_;
+    invert_[2] = invert_rl_;
+    invert_[3] = invert_rr_;
+
+    for (size_t i = 0; i < 4; ++i) {
+      PhidgetEncoderHandle h = nullptr;
+      phidget_check(PhidgetEncoder_create(&h), "PhidgetEncoder_create");
+
+      if (phidget_serial_ >= 0) {
+        phidget_check(Phidget_setDeviceSerialNumber((PhidgetHandle)h, phidget_serial_), "Phidget_setDeviceSerialNumber");
+      }
+
+      // Channel on device
+      phidget_check(Phidget_setChannel((PhidgetHandle)h, encoder_channels_[i]), "Phidget_setChannel");
+
+      // Optional: set hub port / isHubPortDevice if needed (leave default unless required)
+
+      phidget_check(PhidgetEncoder_setOnPositionChangeHandler(h, &HardwareNode::onPositionChangeWithHandle, this),
+                    "PhidgetEncoder_setOnPositionChangeHandler");
+
+      // Open and attach
+      phidget_check(Phidget_openWaitForAttachment((PhidgetHandle)h, 5000), "Phidget_openWaitForAttachment");
+
+      // Reset position to 0 so ticks start at 0
+      phidget_check(PhidgetEncoder_setPosition(h, 0), "PhidgetEncoder_setPosition");
+
+      enc_[i] = h;
+      ticks_[i] = 0;
+
+      RCLCPP_INFO(get_logger(), "Phidget encoder %zu attached: channel=%d invert=%d",
+                  i, encoder_channels_[i], (int)invert_[i]);
+    }
+  }
+
+  void publish_ticks() {
+    base::msg::WheelTicks4 m;
+    m.header.stamp = now();
+    m.header.frame_id = "base_link";
+    m.fl_ticks = ticks_[0];
+    m.fr_ticks = ticks_[1];
+    m.rl_ticks = ticks_[2];
+    m.rr_ticks = ticks_[3];
+    pub_ticks_->publish(m);
+  }
+
+  // --------- Members ----------
   std::string i2c_dev_;
   int i2c_addr_{0};
 
@@ -212,9 +334,22 @@ private:
   int accel_{30};
   int watchdog_ms_{300};
 
+  int phidget_serial_{-1};
+  std::array<int,4> encoder_channels_{ {0,1,2,3} };
+  std::array<bool,4> invert_{ {false,false,false,false} };
+  bool invert_fl_{false}, invert_fr_{false}, invert_rl_{false}, invert_rr_{false};
+  int publish_ticks_ms_{20};
+
+  // Encoder handles and tick counters
+  std::array<PhidgetEncoderHandle,4> enc_{ {nullptr,nullptr,nullptr,nullptr} };
+  std::array<int64_t,4> ticks_{ {0,0,0,0} };
+
   rclcpp::Time last_cmd_time_;
-  rclcpp::TimerBase::SharedPtr timer_;
+  rclcpp::TimerBase::SharedPtr timer_watchdog_;
+  rclcpp::TimerBase::SharedPtr timer_ticks_;
+
   rclcpp::Subscription<std_msgs::msg::Int16MultiArray>::SharedPtr sub_;
+  rclcpp::Publisher<base::msg::WheelTicks4>::SharedPtr pub_ticks_;
 
   std::unique_ptr<NxtServoI2C> nxt_;
 };
