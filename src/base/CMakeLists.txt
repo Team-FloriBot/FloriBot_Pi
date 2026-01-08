@@ -18,13 +18,17 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
-find_package(sensor_msgs REQUIRED)   # <-- NEU
+find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
+
+# --- Phidget22 (for hardware_node) ---
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(PHIDGET22 REQUIRED IMPORTED_TARGET libphidget22)
 
 # ============================================================
 # 1) Custom message interfaces
@@ -104,7 +108,7 @@ target_link_libraries(sensor_aggregator_node
 )
 ament_target_dependencies(sensor_aggregator_node
   rclcpp
-  sensor_msgs          # <-- NEU
+  sensor_msgs
 )
 
 # --- Hardware Node ---
@@ -114,6 +118,7 @@ add_executable(hardware_node
 target_link_libraries(hardware_node
   base_math_lib
   ${cpp_typesupport_target}
+  PkgConfig::PHIDGET22
 )
 ament_target_dependencies(hardware_node
   rclcpp
