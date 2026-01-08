@@ -1,28 +1,30 @@
 hardware_node:
   ros__parameters:
     # =========================================================
-    # I2C / Motorcontroller (NXT Servo Controller)
+    # I2C / NXT Servo Controller
     # =========================================================
     i2c_dev: "/dev/i2c-1"
     i2c_addr: 0x58
 
-    # Normalbetrieb: Kanäle pro Seite (links/rechts)
-    # (aus euren Tests abgeleitet)
-    left_channels:  [2, 0]   # fl, rl
-    right_channels: [3, 1]   # fr, rr
-
     # =========================================================
-    # Testmodus (Einzelrad-Ansteuerung)
+    # Servo channel mapping
     # =========================================================
-    # false -> normaler Betrieb über /base/wheel_cmd (left/right)
-    test_mode: false
+    # Seitenzuordnung (Normalbetrieb)
+    left_channels:  [2, 0]    # fl, rl
+    right_channels: [3, 1]    # fr, rr
 
-    # Explizite Zuordnung: [fl, fr, rl, rr] -> Servo-Kanäle
-    # (aus euren Tests abgeleitet)
+    # Explizite Radzuordnung für Testmodus / interne Logik
+    # Reihenfolge: [fl, fr, rl, rr]
     wheel_channels: [2, 3, 0, 1]
 
     # =========================================================
-    # PWM / Servo Mapping
+    # Per-wheel gain (Encoder-basierte Feinabstimmung)
+    # Reihenfolge: [fl, fr, rl, rr]
+    # =========================================================
+    wheel_gains: [0.90, 1.10, 1.10, 0.90]
+
+    # =========================================================
+    # PWM / Servo mapping
     # =========================================================
     k_us_per_pct: 5.5
     neutral_us: 1480
@@ -32,29 +34,34 @@ hardware_node:
     pct_min: -100
     pct_max: 100
 
-    # Beschleunigungsrampe im Controller (0..255)
+    # Beschleunigungsrampe im Servo-Controller
     acceleration: 30
 
-    # Watchdog: STOP, wenn kein Kommando mehr kommt
+    # =========================================================
+    # Safety
+    # =========================================================
     watchdog_timeout_ms: 300
+
+    # =========================================================
+    # Test mode (Einzelrad-Ansteuerung)
+    # =========================================================
+    test_mode: false
 
     # =========================================================
     # Phidget Encoder (libphidget22)
     # =========================================================
-    # Seriennummer des Phidgets
-    # -1 = erstes gefundenes Gerät
+    # Seriennummer des Phidgets (-1 = erstes gefundenes Gerät)
     phidget_serial: -1
 
     # Zuordnung Phidget-Channel -> Rad
     # Reihenfolge: [fl, fr, rl, rr]
-    # (aus euren Tests abgeleitet)
     encoder_channels: [2, 3, 0, 1]
 
-    # Richtung invertieren (Vorwärtsdrehen soll positiv zählen)
+    # Encoder-Drehrichtung (Vorwärts = positiv)
     invert_fl: true
     invert_fr: false
     invert_rl: true
     invert_rr: false
 
-    # Publish-Rate für /base/wheel_ticks4
+    # Publish-Rate der Encoder-Ticks
     publish_ticks_ms: 20
