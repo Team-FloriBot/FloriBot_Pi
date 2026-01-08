@@ -15,7 +15,7 @@ hardware_node:
     # Testmodus (Einzelrad-Ansteuerung)
     # =========================================================
     # false -> normaler Betrieb über /base/wheel_cmd (left/right)
-    test_mode: false
+    test_mode: true
 
     # Explizite Zuordnung: [fl, fr, rl, rr] -> Servo-Kanäle
     # (aus euren Tests abgeleitet)
