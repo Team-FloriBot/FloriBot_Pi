@@ -1,23 +1,39 @@
 kinematics_node:
   ros__parameters:
-    # cmd_vel -> wheel_cmd
-    wheel_base_m: 0.50
-    v_max_mps: 0.8
+    # Topics
     cmd_vel_topic: /cmd_vel
     wheel_cmd_topic: /base/wheel_cmd
-
-    # ticks -> odom
     wheel_ticks_topic: /base/wheel_ticks4
     odom_topic: /odom
 
-    # geometry / scaling (unbedingt korrekt setzen!)
-    wheel_radius_m: 0.08        # [m] Rad-Radius
-    ticks_per_rev: 2048         # Encoder-Ticks pro Umdrehung
-
-    # frames
+    # Frames
     odom_frame: odom
     base_frame: base_link
     publish_tf: true
 
-    # Debug (für Diagnose)
+    # Geometry / scaling  (WICHTIG: ggf. nach 360°-Test anpassen)
+    wheel_base_m: 0.50
+    wheel_radius_m: 0.10        # 200mm Durchmesser -> 0.10m Radius
+    ticks_per_rev: 131000       # Phidget-Pulse pro Radumdrehung (Startwert)
+
+    # Control loop / safety
+    control_period_ms: 20
+    cmd_timeout_ms: 300
+    v_deadband_mps: 0.02
+
+    # Feedforward (open-loop Anteil)
+    v_max_mps: 0.8
+    use_feedforward: true
+
+    # PID (Startwerte)
+    kp: 30.0
+    ki: 0.0
+    kd: 0.0
+    i_min: -50.0
+    i_max: 50.0
+
+    # Messwert-Filter gegen Ruckeln (0..1, kleiner = stärker glätten)
+    meas_lpf_alpha: 0.3
+
+    # Debug
     debug: true
