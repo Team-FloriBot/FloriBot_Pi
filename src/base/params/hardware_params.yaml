@@ -1,36 +1,62 @@
 hardware_node:
   ros__parameters:
-    # --- I2C (wie bisher) ---
+    # =========================================================
+    # I2C / Motorcontroller (NXT Servo Controller)
+    # =========================================================
     i2c_dev: "/dev/i2c-1"
     i2c_addr: 0x58
 
-    left_channels: [0, 2]
+    # Servo-Kanäle pro Seite (Normalbetrieb)
+    # Links: vorne links, hinten links
+    # Rechts: vorne rechts, hinten rechts
+    left_channels:  [0, 2]
     right_channels: [1, 3]
 
+    # =========================================================
+    # Testmodus (Einzelrad-Ansteuerung)
+    # =========================================================
+    # true  -> /base/wheel_cmd4 aktiv (fl, fr, rl, rr)
+    # false -> normaler Betrieb über /base/wheel_cmd (left/right)
+    test_mode: true
+
+    # Explizite Zuordnung: [fl, fr, rl, rr] -> Servo-Kanäle
+    # MUSS zu left/right passen!
+    wheel_channels: [0, 1, 2, 3]
+
+    # =========================================================
+    # PWM / Servo Mapping
+    # =========================================================
+    # Pulsbreite [µs] = pct * k_us_per_pct + neutral_us
     k_us_per_pct: 5.5
     neutral_us: 1480
     min_us: 900
     max_us: 2100
 
     pct_min: -100
-    pct_max: 100
+    pct_max:  100
 
+    # Beschleunigungsrampe im Controller (0..255)
     acceleration: 30
+
+    # Watchdog: STOP, wenn kein Kommando mehr kommt
     watchdog_timeout_ms: 300
 
-    # --- Phidget22 Encoder (NEU) ---
-    # Falls nur ein Phidget angeschlossen ist: -1 lassen
+    # =========================================================
+    # Phidget Encoder (libphidget22)
+    # =========================================================
+    # Seriennummer des Phidgets
+    # -1 = erstes gefundenes Gerät
     phidget_serial: -1
 
-    # Reihenfolge ist: [fl, fr, rl, rr]
-    # Standard: Kanäle 0..3
+    # Zuordnung Phidget-Channel -> Rad
+    # Reihenfolge: [fl, fr, rl, rr]
     encoder_channels: [0, 1, 2, 3]
 
-    # falls ein Rad falsch herum zählt, hier true setzen
+    # Richtung invertieren (falls Tick-Vorzeichen falsch)
     invert_fl: false
     invert_fr: false
     invert_rl: false
     invert_rr: false
 
-    # Publikationsrate für /base/wheel_ticks4
+    # Publish-Rate für /base/wheel_ticks4
     publish_ticks_ms: 20
