@@ -1,6 +1,7 @@
 hardware_node:
   ros__parameters:
-    i2c_dev: /dev/i2c-1
+    # --- I2C (wie bisher) ---
+    i2c_dev: "/dev/i2c-1"
     i2c_addr: 0x58
 
     left_channels: [0, 2]
@@ -16,3 +17,20 @@ hardware_node:
 
     acceleration: 30
     watchdog_timeout_ms: 300
+
+    # --- Phidget22 Encoder (NEU) ---
+    # Falls nur ein Phidget angeschlossen ist: -1 lassen
+    phidget_serial: -1
+
+    # Reihenfolge ist: [fl, fr, rl, rr]
+    # Standard: Kanäle 0..3
+    encoder_channels: [0, 1, 2, 3]
+
+    # falls ein Rad falsch herum zählt, hier true setzen
+    invert_fl: false
+    invert_fr: false
+    invert_rl: false
+    invert_rr: false
+
+    # Publikationsrate für /base/wheel_ticks4
+    publish_ticks_ms: 20
