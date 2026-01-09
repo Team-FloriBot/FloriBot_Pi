@@ -68,7 +68,7 @@ kinematics_node:
     # Optional: innerhalb einer Seite angleichen (nur wenn aktiviert)
     # =========================
     use_within_side_sync: true
-    sync_k: 15.0
+    sync_k: 30.0
 
     # =========================
     # Debug
