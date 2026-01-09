@@ -136,7 +136,7 @@ public:
     for (size_t i = 0; i < 4; ++i) wheel_gains_[i] = gains[i];
 
     // keep true for kinematics-node closed-loop
-    ignore_wheel_gains_ = declare_parameter<bool>("ignore_wheel_gains", true);
+    ignore_wheel_gains_ = declare_parameter<bool>("ignore_wheel_gains", false);
 
     // PWM mapping: us = pct*k + neutral
     k_us_per_pct_ = declare_parameter<double>("k_us_per_pct", 5.5);
