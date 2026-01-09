@@ -87,6 +87,14 @@ class HardwareNode : public rclcpp::Node {
 public:
   HardwareNode() : Node("hardware_node") {
     // -------------------------
+    // ROS topics (PARAMETRIZED)
+    // -------------------------
+    cmd_lr_topic_   = declare_parameter<std::string>("wheel_cmd_topic",  "/base/wheel_cmd");
+    cmd_4_topic_    = declare_parameter<std::string>("wheel_cmd4_topic", "/base/wheel_cmd4");
+    ticks_topic_    = declare_parameter<std::string>("wheel_ticks_topic","/base/wheel_ticks4");
+    ticks_frame_id_ = declare_parameter<std::string>("ticks_frame_id",   "base_link");
+
+    // -------------------------
     // Parameters (I2C / motor)
     // -------------------------
     i2c_dev_  = declare_parameter<std::string>("i2c_dev", "/dev/i2c-1");
@@ -143,7 +151,7 @@ public:
 
     watchdog_ms_ = declare_parameter<int>("watchdog_timeout_ms", 300);
 
-    // NEW: prefer wheel_cmd4 whenever it arrives (recommended with 4-wheel kinematics)
+    // prefer wheel_cmd4 whenever it arrives (recommended with 4-wheel kinematics)
     prefer_cmd4_ = declare_parameter<bool>("prefer_cmd4", true);
 
     // -------------------------
@@ -154,7 +162,7 @@ public:
     const auto enc_map_i64 =
       declare_parameter<std::vector<int64_t>>("encoder_channels", std::vector<int64_t>{2, 3, 0, 1});
     if (enc_map_i64.size() != 4) {
-      throw std::runtime_error("encoder_channels must have 4 entries: [fl, fr, rl, rr]");
+      throw std::runtime_error("encoder_channels must be 4 entries: [fl, fr, rl, rr]");
     }
     for (size_t i = 0; i < 4; ++i) encoder_channels_[i] = static_cast<int>(enc_map_i64[i]);
 
@@ -166,17 +174,17 @@ public:
     publish_ticks_ms_ = declare_parameter<int>("publish_ticks_ms", 20);
 
     // -------------------------
-    // ROS pubs/subs
+    // ROS pubs/subs (USING PARAM TOPICS)
     // -------------------------
     sub_lr_ = create_subscription<std_msgs::msg::Int16MultiArray>(
-      "/base/wheel_cmd", 10,
+      cmd_lr_topic_, 10,
       std::bind(&HardwareNode::on_cmd_lr, this, std::placeholders::_1));
 
     sub_4_ = create_subscription<std_msgs::msg::Int16MultiArray>(
-      "/base/wheel_cmd4", 10,
+      cmd_4_topic_, 10,
       std::bind(&HardwareNode::on_cmd_4, this, std::placeholders::_1));
 
-    pub_ticks_ = create_publisher<base::msg::WheelTicks4>("/base/wheel_ticks4", 10);
+    pub_ticks_ = create_publisher<base::msg::WheelTicks4>(ticks_topic_, 10);
 
     // -------------------------
     // Init I2C + safety stop
@@ -202,10 +210,12 @@ public:
       std::bind(&HardwareNode::publish_ticks, this));
 
     RCLCPP_INFO(get_logger(),
-      "hardware_node started | I2C %s addr 0x%02x | wheel_map_valid=%d [fl=%d fr=%d rl=%d rr=%d] | gains [%.3f %.3f %.3f %.3f] ignore_wheel_gains=%d accel=%d prefer_cmd4=%d",
+      "hardware_node started | I2C %s addr 0x%02x | wheel_map_valid=%d [fl=%d fr=%d rl=%d rr=%d] | "
+      "topics cmd_lr=%s cmd4=%s ticks=%s | gains [%.3f %.3f %.3f %.3f] ignore_wheel_gains=%d accel=%d prefer_cmd4=%d",
       i2c_dev_.c_str(), i2c_addr_,
       (int)wheel_channels_valid_,
       wheel_channels_[0], wheel_channels_[1], wheel_channels_[2], wheel_channels_[3],
+      cmd_lr_topic_.c_str(), cmd_4_topic_.c_str(), ticks_topic_.c_str(),
       wheel_gains_[0], wheel_gains_[1], wheel_gains_[2], wheel_gains_[3],
       (int)ignore_wheel_gains_, accel_, (int)prefer_cmd4_);
   }
@@ -420,7 +430,7 @@ private:
   void publish_ticks() {
     base::msg::WheelTicks4 m;
     m.header.stamp = now();
-    m.header.frame_id = "base_link";
+    m.header.frame_id = ticks_frame_id_;
     m.fl_ticks = ticks_[0].load(std::memory_order_relaxed);
     m.fr_ticks = ticks_[1].load(std::memory_order_relaxed);
     m.rl_ticks = ticks_[2].load(std::memory_order_relaxed);
@@ -431,6 +441,12 @@ private:
   // -------------------------
   // Members
   // -------------------------
+  // ROS topics
+  std::string cmd_lr_topic_;
+  std::string cmd_4_topic_;
+  std::string ticks_topic_;
+  std::string ticks_frame_id_;
+
   // I2C/motor
   std::string i2c_dev_;
   int i2c_addr_{0};
