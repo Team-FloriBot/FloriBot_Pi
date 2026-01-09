@@ -32,15 +32,30 @@ pkg_check_modules(PHIDGET22 REQUIRED IMPORTED_TARGET libphidget22)
 
 # ============================================================
 # 1) Custom message interfaces
+#    (make sure the files really exist in ${CMAKE_CURRENT_SOURCE_DIR}/msg)
 # ============================================================
+set(MSG_FILES
+  msg/WheelVelocities.msg
+  msg/WheelControllerState.msg
+  msg/WheelTicks4.msg
+)
+
+foreach(_msg ${MSG_FILES})
+  if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_msg}")
+    message(FATAL_ERROR
+      "Missing message file: '${_msg}' (expected at '${CMAKE_CURRENT_SOURCE_DIR}/${_msg}').\n"
+      "Fix by either:\n"
+      "  1) creating the file in the msg/ folder, or\n"
+      "  2) removing it from MSG_FILES, or\n"
+      "  3) correcting the filename (case-sensitive).")
+  endif()
+endforeach()
+
 rosidl_generate_interfaces(${PROJECT_NAME}
-  "msg/WheelVelocities.msg"
-  "msg/WheelControllerState.msg"
-  "msg/WheelTicks4.msg"
+  ${MSG_FILES}
   DEPENDENCIES std_msgs
 )
 
-# Runtime dependency for generated messages
 ament_export_dependencies(rosidl_default_runtime)
 
 # ============================================================
@@ -54,6 +69,10 @@ add_library(base_math_lib
 target_include_directories(base_math_lib PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
+)
+
+ament_target_dependencies(base_math_lib
+  rclcpp
 )
 
 # ============================================================
