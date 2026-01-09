@@ -102,8 +102,7 @@ public:
     for (auto v : left_i64)  left_channels_.push_back(static_cast<int>(v));
     for (auto v : right_i64) right_channels_.push_back(static_cast<int>(v));
 
-    // Optional: explicit wheel->servo channel mapping for test mode: [fl, fr, rl, rr]
-    // If not provided, we derive from left/right: [left[0], right[0], left[1], right[1]]
+    // Optional explicit wheel->servo channel mapping: [fl, fr, rl, rr]
     const auto wheel_i64 =
       declare_parameter<std::vector<int64_t>>("wheel_channels", std::vector<int64_t>{2, 3, 0, 1});
     if (!wheel_i64.empty()) {
@@ -120,18 +119,15 @@ public:
     }
 
     // Per-wheel gains [fl, fr, rl, rr]
-    // For closed-loop control in kinematics_node, keep these at 1.0 (or ignore them).
     const auto gains =
       declare_parameter<std::vector<double>>(
         "wheel_gains", std::vector<double>{1.0, 1.0, 1.0, 1.0});
     if (gains.size() != 4) {
       throw std::runtime_error("wheel_gains must have 4 entries: [fl, fr, rl, rr]");
     }
-    for (size_t i = 0; i < 4; ++i) {
-      wheel_gains_[i] = gains[i];
-    }
+    for (size_t i = 0; i < 4; ++i) wheel_gains_[i] = gains[i];
 
-    // NEW: allow ignoring wheel_gains in normal operation (recommended for kinematics closed-loop)
+    // keep true for kinematics-node closed-loop
     ignore_wheel_gains_ = declare_parameter<bool>("ignore_wheel_gains", true);
 
     // PWM mapping: us = pct*k + neutral
@@ -143,13 +139,12 @@ public:
     pct_min_ = declare_parameter<int>("pct_min", -100);
     pct_max_ = declare_parameter<int>("pct_max",  100);
 
-    // For velocity closed-loop, prefer accel=0 (no hidden actuator ramp).
     accel_ = declare_parameter<int>("acceleration", 0);
 
     watchdog_ms_ = declare_parameter<int>("watchdog_timeout_ms", 300);
 
-    // Test mode: if true, subscribe to /base/wheel_cmd4 and allow per-wheel actuation
-    test_mode_ = declare_parameter<bool>("test_mode", false);
+    // NEW: prefer wheel_cmd4 whenever it arrives (recommended with 4-wheel kinematics)
+    prefer_cmd4_ = declare_parameter<bool>("prefer_cmd4", true);
 
     // -------------------------
     // Parameters (Phidget encoders)
@@ -200,18 +195,19 @@ public:
     // Timers
     // -------------------------
     last_cmd_time_ = now();
+    last_cmd4_time_ = rclcpp::Time(0,0,RCL_ROS_TIME);
     timer_watchdog_ = create_wall_timer(50ms, std::bind(&HardwareNode::watchdog, this));
     timer_ticks_ = create_wall_timer(
       std::chrono::milliseconds(publish_ticks_ms_),
       std::bind(&HardwareNode::publish_ticks, this));
 
     RCLCPP_INFO(get_logger(),
-      "hardware_node started | test_mode=%d | I2C %s addr 0x%02x | wheel_map_valid=%d [fl=%d fr=%d rl=%d rr=%d] | gains [%.3f %.3f %.3f %.3f] ignore_wheel_gains=%d accel=%d",
-      (int)test_mode_, i2c_dev_.c_str(), i2c_addr_,
+      "hardware_node started | I2C %s addr 0x%02x | wheel_map_valid=%d [fl=%d fr=%d rl=%d rr=%d] | gains [%.3f %.3f %.3f %.3f] ignore_wheel_gains=%d accel=%d prefer_cmd4=%d",
+      i2c_dev_.c_str(), i2c_addr_,
       (int)wheel_channels_valid_,
       wheel_channels_[0], wheel_channels_[1], wheel_channels_[2], wheel_channels_[3],
       wheel_gains_[0], wheel_gains_[1], wheel_gains_[2], wheel_gains_[3],
-      (int)ignore_wheel_gains_, accel_);
+      (int)ignore_wheel_gains_, accel_, (int)prefer_cmd4_);
   }
 
   ~HardwareNode() override {
@@ -262,12 +258,6 @@ private:
     for (int ch = 0; ch < 4; ++ch) set_acceleration(ch, accel);
   }
 
-  void apply_side(const std::vector<int>& channels, int pct) {
-    pct = clamp_int(pct, pct_min_, pct_max_);
-    const int pulse = pct_to_pulse_us(pct);
-    for (int ch : channels) write_channel_pulse(ch, pulse);
-  }
-
   void apply_wheel_channel(int servo_channel, int pct) {
     pct = clamp_int(pct, pct_min_, pct_max_);
     const int pulse = pct_to_pulse_us(pct);
@@ -275,8 +265,7 @@ private:
   }
 
   void stop_all() {
-    apply_side(left_channels_,  0);
-    apply_side(right_channels_, 0);
+    for (int ch = 0; ch < 4; ++ch) apply_wheel_channel(ch, 0);
   }
 
   bool derive_wheel_channels_from_sides() {
@@ -291,47 +280,11 @@ private:
     return false;
   }
 
-  // -------------------------
-  // ROS callbacks
-  // -------------------------
-  void on_cmd_lr(const std_msgs::msg::Int16MultiArray::SharedPtr msg) {
-    if (test_mode_) return;
-    if (msg->data.size() < 2) return;
-
-    const int left_pct_in  = clamp_int((int)msg->data[0], pct_min_, pct_max_);
-    const int right_pct_in = clamp_int((int)msg->data[1], pct_min_, pct_max_);
-
-    int fl = left_pct_in;
-    int fr = right_pct_in;
-    int rl = left_pct_in;
-    int rr = right_pct_in;
-
-    if (!ignore_wheel_gains_) {
-      fl = apply_gain(left_pct_in,  wheel_gains_[0]);
-      fr = apply_gain(right_pct_in, wheel_gains_[1]);
-      rl = apply_gain(left_pct_in,  wheel_gains_[2]);
-      rr = apply_gain(right_pct_in, wheel_gains_[3]);
-    }
-
-    try {
-      apply_wheel_channel(wheel_channels_[0], fl);
-      apply_wheel_channel(wheel_channels_[1], fr);
-      apply_wheel_channel(wheel_channels_[2], rl);
-      apply_wheel_channel(wheel_channels_[3], rr);
-      last_cmd_time_ = now();
-    } catch (const std::exception& e) {
-      RCLCPP_ERROR(get_logger(), "I2C write failed (LR): %s", e.what());
-    }
-  }
-
-  void on_cmd_4(const std_msgs::msg::Int16MultiArray::SharedPtr msg) {
-    if (!test_mode_) return;
-    if (msg->data.size() < 4) return;
-
-    int fl = clamp_int((int)msg->data[0], pct_min_, pct_max_);
-    int fr = clamp_int((int)msg->data[1], pct_min_, pct_max_);
-    int rl = clamp_int((int)msg->data[2], pct_min_, pct_max_);
-    int rr = clamp_int((int)msg->data[3], pct_min_, pct_max_);
+  void apply_all_wheels(int fl, int fr, int rl, int rr) {
+    fl = clamp_int(fl, pct_min_, pct_max_);
+    fr = clamp_int(fr, pct_min_, pct_max_);
+    rl = clamp_int(rl, pct_min_, pct_max_);
+    rr = clamp_int(rr, pct_min_, pct_max_);
 
     if (!ignore_wheel_gains_) {
       fl = apply_gain(fl, wheel_gains_[0]);
@@ -340,12 +293,55 @@ private:
       rr = apply_gain(rr, wheel_gains_[3]);
     }
 
+    apply_wheel_channel(wheel_channels_[0], fl);
+    apply_wheel_channel(wheel_channels_[1], fr);
+    apply_wheel_channel(wheel_channels_[2], rl);
+    apply_wheel_channel(wheel_channels_[3], rr);
+  }
+
+  // -------------------------
+  // ROS callbacks
+  // -------------------------
+  void on_cmd_lr(const std_msgs::msg::Int16MultiArray::SharedPtr msg) {
+    if (msg->data.size() < 2) return;
+
+    // if cmd4 is preferred and recently received -> ignore LR to avoid fighting
+    if (prefer_cmd4_) {
+      const auto dt = now() - last_cmd4_time_;
+      if (last_cmd4_time_.nanoseconds() != 0 &&
+          dt.nanoseconds() < (int64_t)200 * 1000000LL) { // 200 ms
+        return;
+      }
+    }
+
+    const int left_pct_in  = clamp_int((int)msg->data[0], pct_min_, pct_max_);
+    const int right_pct_in = clamp_int((int)msg->data[1], pct_min_, pct_max_);
+
+    const int fl = left_pct_in;
+    const int rl = left_pct_in;
+    const int fr = right_pct_in;
+    const int rr = right_pct_in;
+
     try {
-      apply_wheel_channel(wheel_channels_[0], fl);
-      apply_wheel_channel(wheel_channels_[1], fr);
-      apply_wheel_channel(wheel_channels_[2], rl);
-      apply_wheel_channel(wheel_channels_[3], rr);
+      apply_all_wheels(fl, fr, rl, rr);
       last_cmd_time_ = now();
+    } catch (const std::exception& e) {
+      RCLCPP_ERROR(get_logger(), "I2C write failed (LR): %s", e.what());
+    }
+  }
+
+  void on_cmd_4(const std_msgs::msg::Int16MultiArray::SharedPtr msg) {
+    if (msg->data.size() < 4) return;
+
+    int fl = clamp_int((int)msg->data[0], pct_min_, pct_max_);
+    int fr = clamp_int((int)msg->data[1], pct_min_, pct_max_);
+    int rl = clamp_int((int)msg->data[2], pct_min_, pct_max_);
+    int rr = clamp_int((int)msg->data[3], pct_min_, pct_max_);
+
+    try {
+      apply_all_wheels(fl, fr, rl, rr);
+      last_cmd_time_ = now();
+      last_cmd4_time_ = last_cmd_time_;
     } catch (const std::exception& e) {
       RCLCPP_ERROR(get_logger(), "I2C write failed (CMD4): %s", e.what());
     }
@@ -457,7 +453,7 @@ private:
   int accel_{0};
   int watchdog_ms_{300};
 
-  bool test_mode_{false};
+  bool prefer_cmd4_{true};
 
   // Phidget
   int phidget_serial_{-1};
@@ -471,6 +467,7 @@ private:
 
   // ROS
   rclcpp::Time last_cmd_time_;
+  rclcpp::Time last_cmd4_time_;
   rclcpp::TimerBase::SharedPtr timer_watchdog_;
   rclcpp::TimerBase::SharedPtr timer_ticks_;
 
