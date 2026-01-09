@@ -10,6 +10,7 @@
 #include <tf2_ros/transform_broadcaster.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <string>
@@ -24,7 +25,7 @@ public:
     // -------------------------
     cmd_topic_    = declare_parameter<std::string>("cmd_vel_topic", "/cmd_vel");
     out_topic_4_  = declare_parameter<std::string>("wheel_cmd4_topic", "/base/wheel_cmd4");
-    out_topic_lr_ = declare_parameter<std::string>("wheel_cmd_topic",  "/base/wheel_cmd"); // optional fallback/monitoring
+    out_topic_lr_ = declare_parameter<std::string>("wheel_cmd_topic",  "/base/wheel_cmd");
     ticks_topic_  = declare_parameter<std::string>("wheel_ticks_topic", "/base/wheel_ticks4");
     odom_topic_   = declare_parameter<std::string>("odom_topic", "/odom");
 
@@ -37,14 +38,10 @@ public:
 
     // -------------------------
     // Geometry / scaling
-    // track_width_m = Spurbreite (links-rechts).
-    // wheel_base_m ist deprecated; nur als Override wenn > 0 gesetzt.
     // -------------------------
-    track_width_m_  = declare_parameter<double>("track_width_m", 0.385);
-    wheel_base_m_deprecated_ = declare_parameter<double>("wheel_base_m", -1.0);
-    if (wheel_base_m_deprecated_ > 0.0) {
-      track_width_m_ = wheel_base_m_deprecated_;
-    }
+    track_width_m_ = declare_parameter<double>("track_width_m", 0.385);
+    wheel_base_m_deprecated_ = declare_parameter<double>("wheel_base_m", track_width_m_);
+    track_width_m_ = wheel_base_m_deprecated_;
 
     wheel_radius_m_ = declare_parameter<double>("wheel_radius_m", 0.10);
     ticks_per_rev_  = declare_parameter<int64_t>("ticks_per_rev", 131000);
@@ -70,13 +67,22 @@ public:
     min_pwm_pct_      = declare_parameter<int>("min_pwm_pct", 8);
 
     // -------------------------
-    // PI gains (SIDE velocity control for skid-steer)
+    // Per-wheel PI gains
     // units: kp [%/(m/s)], ki [%/(m/s*s)]
     // -------------------------
-    vel_kp_ = declare_parameter<double>("vel_kp", 80.0);
-    vel_ki_ = declare_parameter<double>("vel_ki", 30.0);
-    i_min_  = declare_parameter<double>("i_min", -40.0);
-    i_max_  = declare_parameter<double>("i_max",  40.0);
+    wheel_kp_ = declare_parameter<double>("wheel_kp", 35.0);
+    wheel_ki_ = declare_parameter<double>("wheel_ki", 10.0);
+    i_min_    = declare_parameter<double>("i_min", -40.0);
+    i_max_    = declare_parameter<double>("i_max",  40.0);
+
+    // Optional per-wheel gain for command redistribution (default 1)
+    // This is *inside* kinematics (different from hardware_node wheel_gains).
+    const auto cmd_gain_vec =
+      declare_parameter<std::vector<double>>("cmd_gain_4", std::vector<double>{1.0, 1.0, 1.0, 1.0});
+    if (cmd_gain_vec.size() != 4) {
+      throw std::runtime_error("cmd_gain_4 must have 4 entries: [fl, fr, rl, rr]");
+    }
+    for (size_t i = 0; i < 4; ++i) cmd_gain_4_[i] = cmd_gain_vec[i];
 
     // -------------------------
     // Measurement filtering
@@ -84,14 +90,13 @@ public:
     meas_lpf_alpha_ = declare_parameter<double>("meas_lpf_alpha", 0.2);
 
     // -------------------------
-    // Optional: within-side synchronization
+    // Optional: keep-side-consistency clamp
+    // Limits how far front/back commands on the same side may diverge (in %-points).
+    // 0 disables.
     // -------------------------
-    use_within_side_sync_ = declare_parameter<bool>("use_within_side_sync", true);
-    sync_k_ = declare_parameter<double>("sync_k", 15.0); // [%/(m/s)]
+    max_within_side_diff_pct_ = declare_parameter<int>("max_within_side_diff_pct", 0);
 
-    // -------------------------
     // Debug
-    // -------------------------
     debug_ = declare_parameter<bool>("debug", true);
 
     // pubs/subs
@@ -108,18 +113,17 @@ public:
       ticks_topic_, 10,
       [this](const base::msg::WheelTicks4::SharedPtr msg){ onTicks(*msg); });
 
-    // control loop timer
     timer_ = create_wall_timer(
       std::chrono::milliseconds(std::max(1, control_period_ms_)),
       std::bind(&KinematicsNode::controlLoop, this));
 
     RCLCPP_INFO(get_logger(),
-      "KinematicsNode started | skid_steer SIDE-PI | closed_loop=%d feedforward=%d period=%dms timeout=%dms | "
-      "track_width=%.3f r=%.3f ticks_per_rev=%ld v_max=%.3f | out4=%s | sync=%d k=%.2f",
+      "KinematicsNode started | per-wheel PI | closed_loop=%d feedforward=%d period=%dms timeout=%dms | "
+      "track_width=%.3f r=%.3f ticks_per_rev=%ld v_max=%.3f | kp=%.2f ki=%.2f | max_within_side_diff=%d | out4=%s",
       (int)use_closed_loop_, (int)use_feedforward_, control_period_ms_, cmd_timeout_ms_,
       track_width_m_, wheel_radius_m_, (long)ticks_per_rev_, v_max_mps_,
-      out_topic_4_.c_str(),
-      (int)use_within_side_sync_, sync_k_);
+      wheel_kp_, wheel_ki_, max_within_side_diff_pct_,
+      out_topic_4_.c_str());
   }
 
 private:
@@ -139,6 +143,8 @@ private:
     pct = clampd(pct, -100.0, 100.0);
     return static_cast<int16_t>(std::lround(pct));
   }
+
+  static double signum(double x) { return (x >= 0.0) ? 1.0 : -1.0; }
 
   void onCmd(const geometry_msgs::msg::Twist& t) {
     last_cmd_ = t;
@@ -191,12 +197,11 @@ private:
     }
     meas_time_ = t;
 
-    // ---- Odometry integration (from ds), skid-steer approximation using side averages
+    // ---- Odometry integration (skid-steer approx via side averages)
     const double dl = 0.5 * (ds[FL] + ds[RL]);
     const double dr = 0.5 * (ds[FR] + ds[RR]);
 
     const double ds_body  = 0.5 * (dr + dl);
-
     const double b = track_width_m_;
     const double dth = (b > 1e-9) ? ((dr - dl) / b) : 0.0;
 
@@ -247,12 +252,10 @@ private:
     const rclcpp::Time now_t = now();
 
     // timeout -> stop + reset integrators
-    if (!have_cmd_ ||
-        (now_t - last_cmd_time_).nanoseconds() > (int64_t)cmd_timeout_ms_ * 1000000LL) {
+    if (!have_cmd_ || (now_t - last_cmd_time_).nanoseconds() > (int64_t)cmd_timeout_ms_ * 1000000LL) {
       publishWheelCmd4(0, 0, 0, 0);
       publishWheelCmdLR(0, 0);
-      iL_ = 0.0;
-      iR_ = 0.0;
+      for (double &ii : i_w_) ii = 0.0;
       return;
     }
 
@@ -269,131 +272,132 @@ private:
     const double vL_sp = v - w * (b * 0.5);
     const double vR_sp = v + w * (b * 0.5);
 
-    // Feedforward in [%]
-    auto ffPct = [this](double v_side) -> double {
+    // per-wheel setpoints: skid-steer assumption
+    const double v_sp[4] = { vL_sp, vR_sp, vL_sp, vR_sp };
+
+    // Feedforward [%] from v_sp
+    auto ffPct = [this](double v_w) -> double {
       if (!use_feedforward_ || v_max_mps_ <= 1e-9) return 0.0;
-      return 100.0 * (v_side / v_max_mps_);
+      return 100.0 * (v_w / v_max_mps_);
     };
 
-    double uL = ffPct(vL_sp);
-    double uR = ffPct(vR_sp);
+    double u_ff[4] = { ffPct(v_sp[FL]), ffPct(v_sp[FR]), ffPct(v_sp[RL]), ffPct(v_sp[RR]) };
 
-    auto applyMinPwm = [this](double &u_pct, double v_sp_side) {
-      if (min_pwm_pct_ <= 0) return;
-      if (std::fabs(v_sp_side) < v_deadband_mps_) return;
-      if (std::fabs(u_pct) < 1e-9) return;
-      const double s = (u_pct >= 0.0) ? 1.0 : -1.0;
-      const double mag = std::fabs(u_pct);
-      if (mag < (double)min_pwm_pct_) u_pct = s * (double)min_pwm_pct_;
-    };
-
-    // measurement freshness
-    const bool meas_fresh = have_meas_ &&
-      (now_t - meas_time_).nanoseconds() < (int64_t)500 * 1000000LL; // 500ms
-
-    // fallback to open-loop if no meas
-    if (!use_closed_loop_ || !meas_fresh) {
-      applyMinPwm(uL, vL_sp);
-      applyMinPwm(uR, vR_sp);
-
-      if (!use_within_side_sync_) {
-        publishWheelCmd4(clampPctToInt16(uL), clampPctToInt16(uR),
-                         clampPctToInt16(uL), clampPctToInt16(uR));
-      } else {
-        const double dL = (v_meas_[FL] - v_meas_[RL]);
-        const double dR = (v_meas_[FR] - v_meas_[RR]);
-
-        double uFL = clampd(uL - sync_k_ * dL, -100.0, 100.0);
-        double uRL = clampd(uL + sync_k_ * dL, -100.0, 100.0);
-        double uFR = clampd(uR - sync_k_ * dR, -100.0, 100.0);
-        double uRR = clampd(uR + sync_k_ * dR, -100.0, 100.0);
-
-        applyMinPwm(uFL, vL_sp);
-        applyMinPwm(uRL, vL_sp);
-        applyMinPwm(uFR, vR_sp);
-        applyMinPwm(uRR, vR_sp);
-
-        publishWheelCmd4(clampPctToInt16(uFL), clampPctToInt16(uFR),
-                         clampPctToInt16(uRL), clampPctToInt16(uRR));
+    // Open-loop mode
+    if (!use_closed_loop_) {
+      double u[4] = { u_ff[FL], u_ff[FR], u_ff[RL], u_ff[RR] };
+      for (size_t i = 0; i < 4; ++i) {
+        applyMinPwm(u[i], v_sp[i]);
+        u[i] *= cmd_gain_4_[i];
       }
-
-      publishWheelCmdLR(clampPctToInt16(uL), clampPctToInt16(uR));
+      clampWithinSide(u);
+      publishWheelCmd4(clampPctToInt16(u[FL]), clampPctToInt16(u[FR]),
+                       clampPctToInt16(u[RL]), clampPctToInt16(u[RR]));
+      publishWheelCmdLR(clampPctToInt16(0.5*(u[FL]+u[RL])), clampPctToInt16(0.5*(u[FR]+u[RR])));
       return;
     }
 
-    // ---- CLOSED LOOP: regulate SIDE velocities
-    const double vL_meas = 0.5 * (v_meas_[FL] + v_meas_[RL]);
-    const double vR_meas = 0.5 * (v_meas_[FR] + v_meas_[RR]);
-
-    double eL = vL_sp - vL_meas;
-    double eR = vR_sp - vR_meas;
-    if (std::fabs(eL) < pid_deadband_mps_) eL = 0.0;
-    if (std::fabs(eR) < pid_deadband_mps_) eR = 0.0;
+    // Need fresh measurements; else fallback to open-loop
+    const bool meas_fresh = have_meas_ &&
+      (now_t - meas_time_).nanoseconds() < (int64_t)500 * 1000000LL; // 500ms
+    if (!meas_fresh) {
+      double u[4] = { u_ff[FL], u_ff[FR], u_ff[RL], u_ff[RR] };
+      for (size_t i = 0; i < 4; ++i) {
+        applyMinPwm(u[i], v_sp[i]);
+        u[i] *= cmd_gain_4_[i];
+      }
+      clampWithinSide(u);
+      publishWheelCmd4(clampPctToInt16(u[FL]), clampPctToInt16(u[FR]),
+                       clampPctToInt16(u[RL]), clampPctToInt16(u[RR]));
+      publishWheelCmdLR(clampPctToInt16(0.5*(u[FL]+u[RL])), clampPctToInt16(0.5*(u[FR]+u[RR])));
+      return;
+    }
 
     const double dt = std::max(1e-3, control_period_ms_ / 1000.0);
 
-    // tentative integrator update
-    const double iL_new = clampd(iL_ + vel_ki_ * eL * dt, i_min_, i_max_);
-    const double iR_new = clampd(iR_ + vel_ki_ * eR * dt, i_min_, i_max_);
+    // ---- Per-wheel PI control
+    double u_out[4]{0,0,0,0};
+    double e[4]{0,0,0,0};
 
-    // unsaturated outputs
-    const double uL_unsat = uL + vel_kp_ * eL + iL_new;
-    const double uR_unsat = uR + vel_kp_ * eR + iR_new;
+    for (size_t i = 0; i < 4; ++i) {
+      e[i] = v_sp[i] - v_meas_[i];
+      if (std::fabs(e[i]) < pid_deadband_mps_) e[i] = 0.0;
 
-    double uL_sat = clampd(uL_unsat, -100.0, 100.0);
-    double uR_sat = clampd(uR_unsat, -100.0, 100.0);
+      // tentative integrator update
+      const double i_new = clampd(i_w_[i] + wheel_ki_ * e[i] * dt, i_min_, i_max_);
 
-    auto acceptI = [](double u_unsat, double u_sat, double err) {
-      if (u_unsat == u_sat) return true;
-      if (u_sat >= 100.0 && err > 0.0) return false;
-      if (u_sat <= -100.0 && err < 0.0) return false;
-      return true;
-    };
+      // unsaturated output
+      const double u_unsat = u_ff[i] + wheel_kp_ * e[i] + i_new;
 
-    if (acceptI(uL_unsat, uL_sat, eL)) iL_ = iL_new;
-    if (acceptI(uR_unsat, uR_sat, eR)) iR_ = iR_new;
+      // saturate
+      double u_sat = clampd(u_unsat, -100.0, 100.0);
 
-    uL = uL_sat;
-    uR = uR_sat;
+      // anti-windup: accept integrator only if it would help (or not saturated)
+      if (u_unsat == u_sat) {
+        i_w_[i] = i_new;
+      } else {
+        // saturated
+        if (!((u_sat >= 100.0 && e[i] > 0.0) || (u_sat <= -100.0 && e[i] < 0.0))) {
+          i_w_[i] = i_new;
+        }
+      }
 
-    applyMinPwm(uL, vL_sp);
-    applyMinPwm(uR, vR_sp);
+      u_out[i] = u_sat;
 
-    // Output redistribution within each side
-    if (!use_within_side_sync_) {
-      publishWheelCmd4(clampPctToInt16(uL), clampPctToInt16(uR),
-                       clampPctToInt16(uL), clampPctToInt16(uR));
-    } else {
-      const double dL = (v_meas_[FL] - v_meas_[RL]);
-      const double dR = (v_meas_[FR] - v_meas_[RR]);
+      applyMinPwm(u_out[i], v_sp[i]);
 
-      double uFL = clampd(uL - sync_k_ * dL, -100.0, 100.0);
-      double uRL = clampd(uL + sync_k_ * dL, -100.0, 100.0);
-      double uFR = clampd(uR - sync_k_ * dR, -100.0, 100.0);
-      double uRR = clampd(uR + sync_k_ * dR, -100.0, 100.0);
+      // optional static command gain (to linearize actuators)
+      u_out[i] *= cmd_gain_4_[i];
 
-      applyMinPwm(uFL, vL_sp);
-      applyMinPwm(uRL, vL_sp);
-      applyMinPwm(uFR, vR_sp);
-      applyMinPwm(uRR, vR_sp);
-
-      publishWheelCmd4(clampPctToInt16(uFL), clampPctToInt16(uFR),
-                       clampPctToInt16(uRL), clampPctToInt16(uRR));
+      // final clamp
+      u_out[i] = clampd(u_out[i], -100.0, 100.0);
     }
 
-    publishWheelCmdLR(clampPctToInt16(uL), clampPctToInt16(uR));
+    // optional safety clamp: keep front/back per side not too far apart
+    clampWithinSide(u_out);
+
+    publishWheelCmd4(clampPctToInt16(u_out[FL]), clampPctToInt16(u_out[FR]),
+                     clampPctToInt16(u_out[RL]), clampPctToInt16(u_out[RR]));
+
+    publishWheelCmdLR(clampPctToInt16(0.5*(u_out[FL]+u_out[RL])),
+                      clampPctToInt16(0.5*(u_out[FR]+u_out[RR])));
 
     if (debug_) {
       RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 500,
-        "SP L=%.3f R=%.3f | MEAS L=%.3f R=%.3f | "
-        "uL=%.1f eL=%.3f iL=%.1f | uR=%.1f eR=%.3f iR=%.1f | "
-        "wheels FL v=%.3f FR v=%.3f RL v=%.3f RR v=%.3f",
-        vL_sp, vR_sp,
-        vL_meas, vR_meas,
-        uL, eL, iL_,
-        uR, eR, iR_,
-        v_meas_[FL], v_meas_[FR], v_meas_[RL], v_meas_[RR]);
+        "SP [FL %.3f FR %.3f RL %.3f RR %.3f] | MEAS [%.3f %.3f %.3f %.3f] | "
+        "e [%.3f %.3f %.3f %.3f] | u [%+.1f %+.1f %+.1f %+.1f] | i [%+.1f %+.1f %+.1f %+.1f]",
+        v_sp[FL], v_sp[FR], v_sp[RL], v_sp[RR],
+        v_meas_[FL], v_meas_[FR], v_meas_[RL], v_meas_[RR],
+        e[FL], e[FR], e[RL], e[RR],
+        u_out[FL], u_out[FR], u_out[RL], u_out[RR],
+        i_w_[FL], i_w_[FR], i_w_[RL], i_w_[RR]);
     }
+  }
+
+  void applyMinPwm(double &u_pct, double v_sp) const {
+    if (min_pwm_pct_ <= 0) return;
+    if (std::fabs(v_sp) < v_deadband_mps_) return;
+    if (std::fabs(u_pct) < 1e-9) return;
+    const double s = signum(u_pct);
+    const double mag = std::fabs(u_pct);
+    if (mag < (double)min_pwm_pct_) u_pct = s * (double)min_pwm_pct_;
+  }
+
+  void clampWithinSide(double u[4]) const {
+    const int md = max_within_side_diff_pct_;
+    if (md <= 0) return;
+
+    // Left side (FL, RL)
+    double uL_avg = 0.5 * (u[FL] + u[RL]);
+    u[FL] = clampd(u[FL], uL_avg - md, uL_avg + md);
+    u[RL] = clampd(u[RL], uL_avg - md, uL_avg + md);
+
+    // Right side (FR, RR)
+    double uR_avg = 0.5 * (u[FR] + u[RR]);
+    u[FR] = clampd(u[FR], uR_avg - md, uR_avg + md);
+    u[RR] = clampd(u[RR], uR_avg - md, uR_avg + md);
+
+    for (size_t i = 0; i < 4; ++i) u[i] = clampd(u[i], -100.0, 100.0);
   }
 
   void publishWheelCmd4(int16_t fl, int16_t fr, int16_t rl, int16_t rr) {
@@ -428,7 +432,7 @@ private:
   bool publish_tf_{true};
 
   double track_width_m_{0.385};
-  double wheel_base_m_deprecated_{-1.0};
+  double wheel_base_m_deprecated_{0.385};
 
   double wheel_radius_m_{0.10};
   int64_t ticks_per_rev_{131000};
@@ -444,15 +448,16 @@ private:
   double pid_deadband_mps_{0.01};
   int min_pwm_pct_{8};
 
-  double vel_kp_{80.0};
-  double vel_ki_{30.0};
+  double wheel_kp_{35.0};
+  double wheel_ki_{10.0};
   double i_min_{-40.0};
   double i_max_{ 40.0};
 
+  std::array<double,4> cmd_gain_4_{ {1.0, 1.0, 1.0, 1.0} };
+
   double meas_lpf_alpha_{0.2};
 
-  bool use_within_side_sync_{true};
-  double sync_k_{15.0};
+  int max_within_side_diff_pct_{0};
 
   bool debug_{true};
 
@@ -481,15 +486,14 @@ private:
   double v_meas_[4]{0.0,0.0,0.0,0.0};
   rclcpp::Time meas_time_{0,0,RCL_ROS_TIME};
 
-  // SIDE PI integrators
-  double iL_{0.0};
-  double iR_{0.0};
+  // per-wheel integrators
+  double i_w_[4]{0.0,0.0,0.0,0.0};
 
   // odom state
   double x_{0.0}, y_{0.0}, th_{0.0};
 };
 
-int main(int argc, char** argv) {
+int main(int argc, char** argv){
   rclcpp::init(argc, argv);
   rclcpp::spin(std::make_shared<KinematicsNode>());
   rclcpp::shutdown();
