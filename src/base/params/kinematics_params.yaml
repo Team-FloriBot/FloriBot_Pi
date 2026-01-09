@@ -1,69 +1,22 @@
 kinematics_node:
   ros__parameters:
-    # =========================
-    # Topics
-    # =========================
-    cmd_vel_topic: /cmd_vel
-    wheel_cmd4_topic: /base/wheel_cmd4
-    wheel_cmd_topic: /base/wheel_cmd
-    wheel_ticks_topic: /base/wheel_ticks4
-    odom_topic: /odom
-
-    # =========================
-    # Frames
-    # =========================
-    odom_frame: odom
-    base_frame: base_link
-    publish_tf: true
-
-    # =========================
-    # Geometry
-    # =========================
-    track_width_m: 0.385
-    wheel_base_m: 0.385
-    wheel_radius_m: 0.10
-    ticks_per_rev: 131000
-
-    # =========================
-    # Timing
-    # =========================
-    control_period_ms: 20
-    cmd_timeout_ms: 300
-
-    # =========================
-    # Control
-    # =========================
     use_closed_loop: true
     use_feedforward: true
     v_max_mps: 0.4
 
-    # =========================
-    # Deadbands
-    # =========================
-    v_deadband_mps: 0.03
-    pid_deadband_mps: 0.02
-    min_pwm_pct: 12
-
-    # =========================
-    # PI-Regler (SIDE)
-    # =========================
-    vel_kp: 35.0
-    vel_ki: 10.0
+    wheel_kp: 35.0
+    wheel_ki: 10.0
     i_min: -40.0
     i_max: 40.0
 
-    # =========================
-    # Filter
-    # =========================
+    # wenn du die in-air Abweichungen schon kennst:
+    # cmd_gain_4 skaliert die Befehle pro Rad (Kinematics-intern).
+    # Beispiel: hinten schneller -> Gains < 1
+    cmd_gain_4: [1.0, 1.0, 0.855, 0.806]
+
+    # optional: hart begrenzen, wie stark FL/RL bzw FR/RR auseinanderlaufen dürfen
+    max_within_side_diff_pct: 0   # z.B. 20 setzen, wenn du es begrenzen willst
+
+    min_pwm_pct: 12
     meas_lpf_alpha: 0.10
-
-    # =========================
-    # Seiten-Synchronisation
-    # =========================
-    use_within_side_sync: true
-    sync_k: 45.0
-
-    # =========================
-    # Debug
-    # =========================
     debug: true
