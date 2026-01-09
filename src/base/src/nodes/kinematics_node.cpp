@@ -10,6 +10,7 @@
 #include <tf2_ros/transform_broadcaster.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <string>
@@ -23,7 +24,8 @@ public:
     // Topics
     // -------------------------
     cmd_topic_    = declare_parameter<std::string>("cmd_vel_topic", "/cmd_vel");
-    out_topic_    = declare_parameter<std::string>("wheel_cmd_topic", "/base/wheel_cmd");
+    out_topic_4_  = declare_parameter<std::string>("wheel_cmd4_topic", "/base/wheel_cmd4");
+    out_topic_lr_ = declare_parameter<std::string>("wheel_cmd_topic",  "/base/wheel_cmd"); // optional fallback
     ticks_topic_  = declare_parameter<std::string>("wheel_ticks_topic", "/base/wheel_ticks4");
     odom_topic_   = declare_parameter<std::string>("odom_topic", "/odom");
 
@@ -62,7 +64,7 @@ public:
     min_pwm_pct_      = declare_parameter<int>("min_pwm_pct", 8);
 
     // -------------------------
-    // PI gains (side velocity control)
+    // PI gains (wheel velocity control)
     // units: kp [%/(m/s)], ki [%/(m/s*s)]
     // -------------------------
     vel_kp_ = declare_parameter<double>("vel_kp", 80.0);
@@ -81,7 +83,8 @@ public:
     debug_ = declare_parameter<bool>("debug", true);
 
     // pubs/subs
-    pub_wheel_cmd_ = create_publisher<std_msgs::msg::Int16MultiArray>(out_topic_, 10);
+    pub_wheel_cmd4_ = create_publisher<std_msgs::msg::Int16MultiArray>(out_topic_4_, 10);
+    pub_wheel_cmd_lr_ = create_publisher<std_msgs::msg::Int16MultiArray>(out_topic_lr_, 10);
     pub_odom_      = create_publisher<nav_msgs::msg::Odometry>(odom_topic_, 10);
     tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 
@@ -100,12 +103,15 @@ public:
 
     RCLCPP_INFO(get_logger(),
       "KinematicsNode started | closed_loop=%d feedforward=%d period=%dms timeout=%dms | "
-      "b=%.3f r=%.3f ticks_per_rev=%ld v_max=%.3f",
+      "b=%.3f r=%.3f ticks_per_rev=%ld v_max=%.3f | out4=%s",
       (int)use_closed_loop_, (int)use_feedforward_, control_period_ms_, cmd_timeout_ms_,
-      wheel_base_m_, wheel_radius_m_, (long)ticks_per_rev_, v_max_mps_);
+      wheel_base_m_, wheel_radius_m_, (long)ticks_per_rev_, v_max_mps_,
+      out_topic_4_.c_str());
   }
 
 private:
+  enum Wheel : size_t { FL=0, FR=1, RL=2, RR=3 };
+
   static double wrapAngle(double a) {
     while (a > M_PI)  a -= 2.0 * M_PI;
     while (a < -M_PI) a += 2.0 * M_PI;
@@ -133,18 +139,19 @@ private:
 
     if (!have_last_ticks_) {
       have_last_ticks_ = true;
-      last_fl_ = m.fl_ticks; last_fr_ = m.fr_ticks;
-      last_rl_ = m.rl_ticks; last_rr_ = m.rr_ticks;
+      last_ticks_[FL] = m.fl_ticks;
+      last_ticks_[FR] = m.fr_ticks;
+      last_ticks_[RL] = m.rl_ticks;
+      last_ticks_[RR] = m.rr_ticks;
       last_ticks_time_ = t;
       return;
     }
 
     if (ticks_per_rev_ <= 0 || wheel_radius_m_ <= 1e-9) return;
 
-    const int64_t dfl = m.fl_ticks - last_fl_;
-    const int64_t dfr = m.fr_ticks - last_fr_;
-    const int64_t drl = m.rl_ticks - last_rl_;
-    const int64_t drr = m.rr_ticks - last_rr_;
+    const int64_t cur_ticks[4] = { m.fl_ticks, m.fr_ticks, m.rl_ticks, m.rr_ticks };
+    int64_t d[4];
+    for (size_t i = 0; i < 4; ++i) d[i] = cur_ticks[i] - last_ticks_[i];
 
     double dt = (t - last_ticks_time_).seconds();
     if (dt <= 1e-6) dt = 1e-6;
@@ -152,47 +159,38 @@ private:
     const double meters_per_tick =
       (2.0 * M_PI * wheel_radius_m_) / static_cast<double>(ticks_per_rev_);
 
-    const double ds_fl = static_cast<double>(dfl) * meters_per_tick;
-    const double ds_fr = static_cast<double>(dfr) * meters_per_tick;
-    const double ds_rl = static_cast<double>(drl) * meters_per_tick;
-    const double ds_rr = static_cast<double>(drr) * meters_per_tick;
+    // per-wheel distance + velocity
+    double ds[4], v[4];
+    for (size_t i = 0; i < 4; ++i) {
+      ds[i] = static_cast<double>(d[i]) * meters_per_tick;
+      v[i]  = ds[i] / dt;
+    }
 
-    // per-wheel linear velocity [m/s]
-    const double v_fl = ds_fl / dt;
-    const double v_fr = ds_fr / dt;
-    const double v_rl = ds_rl / dt;
-    const double v_rr = ds_rr / dt;
-
-    // side average velocities [m/s]
-    const double vL = 0.5 * (v_fl + v_rl);
-    const double vR = 0.5 * (v_fr + v_rr);
-
-    // low-pass filter
+    // low-pass filter per wheel
     if (!have_meas_) {
-      vL_meas_ = vL;
-      vR_meas_ = vR;
+      for (size_t i = 0; i < 4; ++i) v_meas_[i] = v[i];
       have_meas_ = true;
     } else {
       const double a = clampd(meas_lpf_alpha_, 0.0, 1.0);
-      vL_meas_ = (1.0 - a) * vL_meas_ + a * vL;
-      vR_meas_ = (1.0 - a) * vR_meas_ + a * vR;
+      for (size_t i = 0; i < 4; ++i) {
+        v_meas_[i] = (1.0 - a) * v_meas_[i] + a * v[i];
+      }
     }
     meas_time_ = t;
 
-    // ---- Odometry integration (from ds)
-    const double dl = 0.5 * (ds_fl + ds_rl);
-    const double dr = 0.5 * (ds_fr + ds_rr);
+    // ---- Odometry integration (from ds), classic differential-drive using side averages
+    const double dl = 0.5 * (ds[FL] + ds[RL]);
+    const double dr = 0.5 * (ds[FR] + ds[RR]);
 
-    const double ds  = 0.5 * (dr + dl);
+    const double ds_body  = 0.5 * (dr + dl);
     const double dth = (wheel_base_m_ > 1e-9) ? ((dr - dl) / wheel_base_m_) : 0.0;
 
     const double th_mid = th_ + 0.5 * dth;
-    x_  += ds * std::cos(th_mid);
-    y_  += ds * std::sin(th_mid);
+    x_  += ds_body * std::cos(th_mid);
+    y_  += ds_body * std::sin(th_mid);
     th_ = wrapAngle(th_ + dth);
 
-    // body velocities
-    const double v_body = ds / dt;
+    const double v_body = ds_body / dt;
     const double w_body = dth / dt;
 
     nav_msgs::msg::Odometry odom;
@@ -226,8 +224,7 @@ private:
       tf_broadcaster_->sendTransform(tf);
     }
 
-    last_fl_ = m.fl_ticks; last_fr_ = m.fr_ticks;
-    last_rl_ = m.rl_ticks; last_rr_ = m.rr_ticks;
+    for (size_t i = 0; i < 4; ++i) last_ticks_[i] = cur_ticks[i];
     last_ticks_time_ = t;
   }
 
@@ -236,8 +233,9 @@ private:
 
     // timeout -> stop + reset integrators
     if (!have_cmd_ || (now_t - last_cmd_time_).nanoseconds() > (int64_t)cmd_timeout_ms_ * 1000000LL) {
-      publishWheelCmd(0, 0);
-      iL_ = 0.0; iR_ = 0.0;
+      publishWheelCmd4(0, 0, 0, 0);
+      publishWheelCmdLR(0, 0);
+      for (double &ii : i_) ii = 0.0;
       return;
     }
 
@@ -249,25 +247,31 @@ private:
     if (std::fabs(v) < v_deadband_mps_) v = 0.0;
     if (std::fabs(w) < 1e-9) w = 0.0;
 
-    // wheel setpoints [m/s]
+    // side wheel setpoints [m/s]
     const double b = wheel_base_m_;
     const double vL_sp = v - w * (b * 0.5);
     const double vR_sp = v + w * (b * 0.5);
 
-    // feedforward [%]
+    // per-wheel setpoints: enforce pair equality by construction
+    double v_sp[4];
+    v_sp[FL] = vL_sp;
+    v_sp[RL] = vL_sp;
+    v_sp[FR] = vR_sp;
+    v_sp[RR] = vR_sp;
+
     auto ffPct = [this](double v_wheel) -> double {
       if (!use_feedforward_ || v_max_mps_ <= 1e-9) return 0.0;
       return 100.0 * (v_wheel / v_max_mps_);
     };
 
-    double uL = ffPct(vL_sp);
-    double uR = ffPct(vR_sp);
+    double u[4];
+    for (size_t i = 0; i < 4; ++i) u[i] = ffPct(v_sp[i]);
 
     if (!use_closed_loop_) {
-      // open-loop only
-      applyMinPwm(uL, vL_sp);
-      applyMinPwm(uR, vR_sp);
-      publishWheelCmd(clampPctToInt16(uL), clampPctToInt16(uR));
+      for (size_t i = 0; i < 4; ++i) applyMinPwm(u[i], v_sp[i]);
+      publishWheelCmd4(clampPctToInt16(u[FL]), clampPctToInt16(u[FR]),
+                       clampPctToInt16(u[RL]), clampPctToInt16(u[RR]));
+      publishWheelCmdLR(clampPctToInt16(u[FL]), clampPctToInt16(u[FR]));
       return;
     }
 
@@ -275,62 +279,65 @@ private:
     const bool meas_fresh = have_meas_ &&
       (now_t - meas_time_).nanoseconds() < (int64_t)500 * 1000000LL; // 500ms
     if (!meas_fresh) {
-      applyMinPwm(uL, vL_sp);
-      applyMinPwm(uR, vR_sp);
-      publishWheelCmd(clampPctToInt16(uL), clampPctToInt16(uR));
+      for (size_t i = 0; i < 4; ++i) applyMinPwm(u[i], v_sp[i]);
+      publishWheelCmd4(clampPctToInt16(u[FL]), clampPctToInt16(u[FR]),
+                       clampPctToInt16(u[RL]), clampPctToInt16(u[RR]));
+      publishWheelCmdLR(clampPctToInt16(u[FL]), clampPctToInt16(u[FR]));
       return;
     }
 
-    // PI control in [%]
+    // PI control in [%] per wheel
     const double dt = std::max(1e-3, control_period_ms_ / 1000.0);
 
-    const double eL = vL_sp - vL_meas_;
-    const double eR = vR_sp - vR_meas_;
-
-    // small-error deadband for PI
-    const double eL_eff = (std::fabs(eL) < pid_deadband_mps_) ? 0.0 : eL;
-    const double eR_eff = (std::fabs(eR) < pid_deadband_mps_) ? 0.0 : eR;
-
-    double pL = vel_kp_ * eL_eff;
-    double pR = vel_kp_ * eR_eff;
+    double e[4];
+    for (size_t i = 0; i < 4; ++i) {
+      e[i] = v_sp[i] - v_meas_[i];
+      if (std::fabs(e[i]) < pid_deadband_mps_) e[i] = 0.0;
+    }
 
     // tentative integrator update
-    double iL_new = clampd(iL_ + vel_ki_ * eL_eff * dt, i_min_, i_max_);
-    double iR_new = clampd(iR_ + vel_ki_ * eR_eff * dt, i_min_, i_max_);
+    double i_new[4];
+    for (size_t i = 0; i < 4; ++i) {
+      i_new[i] = clampd(i_[i] + vel_ki_ * e[i] * dt, i_min_, i_max_);
+    }
 
     // unsaturated outputs
-    double uL_unsat = uL + pL + iL_new;
-    double uR_unsat = uR + pR + iR_new;
+    double u_unsat[4], u_sat[4];
+    for (size_t i = 0; i < 4; ++i) {
+      const double p = vel_kp_ * e[i];
+      u_unsat[i] = u[i] + p + i_new[i];
+      u_sat[i]   = clampd(u_unsat[i], -100.0, 100.0);
+    }
 
-    // saturate
-    double uL_sat = clampd(uL_unsat, -100.0, 100.0);
-    double uR_sat = clampd(uR_unsat, -100.0, 100.0);
-
-    // simple anti-windup: accept integrator only if not driving further into saturation
     auto acceptI = [](double u_unsat, double u_sat, double err) {
       if (u_unsat == u_sat) return true;
-      // if saturated high and error positive -> would increase further -> reject
       if (u_sat >= 100.0 && err > 0.0) return false;
-      // if saturated low and error negative -> would decrease further -> reject
       if (u_sat <= -100.0 && err < 0.0) return false;
       return true;
     };
 
-    if (acceptI(uL_unsat, uL_sat, eL_eff)) iL_ = iL_new;
-    if (acceptI(uR_unsat, uR_sat, eR_eff)) iR_ = iR_new;
+    for (size_t i = 0; i < 4; ++i) {
+      if (acceptI(u_unsat[i], u_sat[i], e[i])) i_[i] = i_new[i];
+      u[i] = u_sat[i];
+      applyMinPwm(u[i], v_sp[i]);
+    }
 
-    // apply min pwm for nonzero setpoint
-    uL = uL_sat;
-    uR = uR_sat;
-    applyMinPwm(uL, vL_sp);
-    applyMinPwm(uR, vR_sp);
-
-    publishWheelCmd(clampPctToInt16(uL), clampPctToInt16(uR));
+    publishWheelCmd4(clampPctToInt16(u[FL]), clampPctToInt16(u[FR]),
+                     clampPctToInt16(u[RL]), clampPctToInt16(u[RR]));
+    // optional: still publish LR for compatibility/monitoring
+    publishWheelCmdLR(clampPctToInt16(0.5 * (u[FL] + u[RL])),
+                      clampPctToInt16(0.5 * (u[FR] + u[RR])));
 
     if (debug_) {
       RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 500,
-        "vL_sp=%.3f vL=%.3f uL=%.1f | vR_sp=%.3f vR=%.3f uR=%.1f | eL=%.3f eR=%.3f iL=%.1f iR=%.1f",
-        vL_sp, vL_meas_, uL, vR_sp, vR_meas_, uR, eL, eR, iL_, iR_);
+        "SP L=%.3f R=%.3f | "
+        "FL v=%.3f u=%.1f e=%.3f i=%.1f | FR v=%.3f u=%.1f e=%.3f i=%.1f | "
+        "RL v=%.3f u=%.1f e=%.3f i=%.1f | RR v=%.3f u=%.1f e=%.3f i=%.1f",
+        vL_sp, vR_sp,
+        v_meas_[FL], u[FL], e[FL], i_[FL],
+        v_meas_[FR], u[FR], e[FR], i_[FR],
+        v_meas_[RL], u[RL], e[RL], i_[RL],
+        v_meas_[RR], u[RR], e[RR], i_[RR]);
     }
   }
 
@@ -343,19 +350,30 @@ private:
     if (mag < (double)min_pwm_pct_) u_pct = s * (double)min_pwm_pct_;
   }
 
-  void publishWheelCmd(int16_t left_pct, int16_t right_pct) {
+  void publishWheelCmd4(int16_t fl, int16_t fr, int16_t rl, int16_t rr) {
+    std_msgs::msg::Int16MultiArray out;
+    out.data.resize(4);
+    out.data[0] = fl;
+    out.data[1] = fr;
+    out.data[2] = rl;
+    out.data[3] = rr;
+    pub_wheel_cmd4_->publish(out);
+  }
+
+  void publishWheelCmdLR(int16_t left_pct, int16_t right_pct) {
     std_msgs::msg::Int16MultiArray out;
     out.data.resize(2);
     out.data[0] = left_pct;
     out.data[1] = right_pct;
-    pub_wheel_cmd_->publish(out);
+    pub_wheel_cmd_lr_->publish(out);
   }
 
   // -------------------------
   // Params
   // -------------------------
   std::string cmd_topic_;
-  std::string out_topic_;
+  std::string out_topic_4_;
+  std::string out_topic_lr_;
   std::string ticks_topic_;
   std::string odom_topic_;
 
@@ -389,7 +407,8 @@ private:
   // -------------------------
   // ROS
   // -------------------------
-  rclcpp::Publisher<std_msgs::msg::Int16MultiArray>::SharedPtr pub_wheel_cmd_;
+  rclcpp::Publisher<std_msgs::msg::Int16MultiArray>::SharedPtr pub_wheel_cmd4_;
+  rclcpp::Publisher<std_msgs::msg::Int16MultiArray>::SharedPtr pub_wheel_cmd_lr_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_odom_;
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr sub_cmd_;
   rclcpp::Subscription<base::msg::WheelTicks4>::SharedPtr sub_ticks_;
@@ -403,15 +422,15 @@ private:
 
   // ticks / measurement state
   bool have_last_ticks_{false};
-  int64_t last_fl_{0}, last_fr_{0}, last_rl_{0}, last_rr_{0};
+  int64_t last_ticks_[4]{0,0,0,0};
   rclcpp::Time last_ticks_time_{0,0,RCL_ROS_TIME};
 
   bool have_meas_{false};
-  double vL_meas_{0.0}, vR_meas_{0.0};
+  double v_meas_[4]{0.0,0.0,0.0,0.0};
   rclcpp::Time meas_time_{0,0,RCL_ROS_TIME};
 
-  // PI integrators
-  double iL_{0.0}, iR_{0.0};
+  // PI integrators per wheel
+  double i_[4]{0.0,0.0,0.0,0.0};
 
   // odom state
   double x_{0.0}, y_{0.0}, th_{0.0};
