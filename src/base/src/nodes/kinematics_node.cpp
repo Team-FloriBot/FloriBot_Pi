@@ -25,7 +25,7 @@ public:
     // -------------------------
     cmd_topic_    = declare_parameter<std::string>("cmd_vel_topic", "/cmd_vel");
     out_topic_4_  = declare_parameter<std::string>("wheel_cmd4_topic", "/base/wheel_cmd4");
-    out_topic_lr_ = declare_parameter<std::string>("wheel_cmd_topic",  "/base/wheel_cmd"); // optional fallback
+    out_topic_lr_ = declare_parameter<std::string>("wheel_cmd_topic",  "/base/wheel_cmd"); // optional fallback/monitoring
     ticks_topic_  = declare_parameter<std::string>("wheel_ticks_topic", "/base/wheel_ticks4");
     odom_topic_   = declare_parameter<std::string>("odom_topic", "/odom");
 
@@ -38,8 +38,15 @@ public:
 
     // -------------------------
     // Geometry / scaling
+    // track_width_m = Spurbreite (links-rechts), NICHT Radstand.
+    // Backward compatibility: wheel_base_m (deprecated) can still be set.
     // -------------------------
-    wheel_base_m_   = declare_parameter<double>("wheel_base_m", 0.50);
+    track_width_m_  = declare_parameter<double>("track_width_m", 0.385);
+    wheel_base_m_deprecated_ = declare_parameter<double>("wheel_base_m", track_width_m_);
+    // If user still sets wheel_base_m explicitly, it overrides track_width_m.
+    // (This avoids silent mismatch when old YAML is used.)
+    track_width_m_ = wheel_base_m_deprecated_;
+
     wheel_radius_m_ = declare_parameter<double>("wheel_radius_m", 0.10);
     ticks_per_rev_  = declare_parameter<int64_t>("ticks_per_rev", 131000);
 
@@ -103,9 +110,9 @@ public:
 
     RCLCPP_INFO(get_logger(),
       "KinematicsNode started | closed_loop=%d feedforward=%d period=%dms timeout=%dms | "
-      "b=%.3f r=%.3f ticks_per_rev=%ld v_max=%.3f | out4=%s",
+      "track_width=%.3f r=%.3f ticks_per_rev=%ld v_max=%.3f | out4=%s",
       (int)use_closed_loop_, (int)use_feedforward_, control_period_ms_, cmd_timeout_ms_,
-      wheel_base_m_, wheel_radius_m_, (long)ticks_per_rev_, v_max_mps_,
+      track_width_m_, wheel_radius_m_, (long)ticks_per_rev_, v_max_mps_,
       out_topic_4_.c_str());
   }
 
@@ -178,12 +185,14 @@ private:
     }
     meas_time_ = t;
 
-    // ---- Odometry integration (from ds), classic differential-drive using side averages
+    // ---- Odometry integration (from ds), differential-drive using side averages
     const double dl = 0.5 * (ds[FL] + ds[RL]);
     const double dr = 0.5 * (ds[FR] + ds[RR]);
 
     const double ds_body  = 0.5 * (dr + dl);
-    const double dth = (wheel_base_m_ > 1e-9) ? ((dr - dl) / wheel_base_m_) : 0.0;
+
+    const double b = track_width_m_;
+    const double dth = (b > 1e-9) ? ((dr - dl) / b) : 0.0;
 
     const double th_mid = th_ + 0.5 * dth;
     x_  += ds_body * std::cos(th_mid);
@@ -247,8 +256,8 @@ private:
     if (std::fabs(v) < v_deadband_mps_) v = 0.0;
     if (std::fabs(w) < 1e-9) w = 0.0;
 
-    // side wheel setpoints [m/s]
-    const double b = wheel_base_m_;
+    // side wheel setpoints [m/s] using track width b
+    const double b = track_width_m_;
     const double vL_sp = v - w * (b * 0.5);
     const double vR_sp = v + w * (b * 0.5);
 
@@ -324,7 +333,6 @@ private:
 
     publishWheelCmd4(clampPctToInt16(u[FL]), clampPctToInt16(u[FR]),
                      clampPctToInt16(u[RL]), clampPctToInt16(u[RR]));
-    // optional: still publish LR for compatibility/monitoring
     publishWheelCmdLR(clampPctToInt16(0.5 * (u[FL] + u[RL])),
                       clampPctToInt16(0.5 * (u[FR] + u[RR])));
 
@@ -381,7 +389,9 @@ private:
   std::string base_frame_{"base_link"};
   bool publish_tf_{true};
 
-  double wheel_base_m_{0.50};
+  double track_width_m_{0.385};
+  double wheel_base_m_deprecated_{0.385};
+
   double wheel_radius_m_{0.10};
   int64_t ticks_per_rev_{131000};
 
