@@ -1,7 +1,7 @@
 hardware_node:
   ros__parameters:
     # =========================
-    # ROS topics (passend zu kinematics_node + Code)
+    # ROS topics
     # =========================
     wheel_cmd_topic: /base/wheel_cmd
     wheel_cmd4_topic: /base/wheel_cmd4
@@ -20,11 +20,15 @@ hardware_node:
     right_channels: [3, 1]
     wheel_channels: [2, 3, 0, 1]   # [fl, fr, rl, rr]
 
-    # Wheel-Gains (werden im Regelbetrieb ignoriert)
+    # =========================
+    # Wheel-Gains (werden ignoriert)
+    # =========================
     wheel_gains: [1.012, 1.309, 1.231, 1.764]
     ignore_wheel_gains: true
 
-    # PWM Mapping: us = pct*k + neutral
+    # =========================
+    # PWM global (Fallback)
+    # =========================
     k_us_per_pct: 5.5
     neutral_us: 1480
     min_us: 900
@@ -32,7 +36,21 @@ hardware_node:
     pct_min: -100
     pct_max: 100
 
-    # Ramp / Safety
+    # =========================
+    # PWM pro Rad (entscheidend!)
+    # =========================
+    # Reihenfolge: [fl, fr, rl, rr]
+    k_us_per_pct_4: [5.5, 5.5, 5.5, 5.5]
+    neutral_us_4:   [1480, 1480, 1480, 1480]
+    min_us_4:       [900, 900, 900, 900]
+    max_us_4:       [2100, 2100, 2100, 2100]
+
+    # Totband pro Rad (in Prozent)
+    deadband_pct_4: [0, 0, 0, 0]
+
+    # =========================
+    # Safety
+    # =========================
     acceleration: 0
     watchdog_timeout_ms: 300
 
@@ -40,7 +58,7 @@ hardware_node:
     # Encoder (Phidget)
     # =========================
     phidget_serial: -1
-    encoder_channels: [2, 3, 0, 1]  # [fl, fr, rl, rr]
+    encoder_channels: [2, 3, 0, 1]   # [fl, fr, rl, rr]
 
     invert_fl: true
     invert_fr: false
