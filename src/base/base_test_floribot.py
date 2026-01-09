@@ -191,9 +191,9 @@ def main():
 
     # Testläufe
     # node.drive_circle(radius=0.5, v=0.2)
-    #node.drive_straight(distance=1.0, v=0.2)
+    node.drive_straight(distance=1.0, v=0.2)
     #node.rotate(n_rotations=1, omega=0.5)
-    node.rotate(n_rotations=5, omega=0.5)
+    #node.rotate(n_rotations=5, omega=0.5)
 
     node.destroy_node()
     rclpy.shutdown()
