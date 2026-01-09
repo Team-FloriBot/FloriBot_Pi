@@ -24,7 +24,7 @@ public:
     // -------------------------
     cmd_topic_    = declare_parameter<std::string>("cmd_vel_topic", "/cmd_vel");
     out_topic_4_  = declare_parameter<std::string>("wheel_cmd4_topic", "/base/wheel_cmd4");
-    out_topic_lr_ = declare_parameter<std::string>("wheel_cmd_topic",  "/base/wheel_cmd");
+    out_topic_lr_ = declare_parameter<std::string>("wheel_cmd_topic",  "/base/wheel_cmd"); // optional fallback/monitoring
     ticks_topic_  = declare_parameter<std::string>("wheel_ticks_topic", "/base/wheel_ticks4");
     odom_topic_   = declare_parameter<std::string>("odom_topic", "/odom");
 
@@ -37,10 +37,14 @@ public:
 
     // -------------------------
     // Geometry / scaling
+    // track_width_m = Spurbreite (links-rechts).
+    // wheel_base_m ist deprecated; nur als Override wenn > 0 gesetzt.
     // -------------------------
     track_width_m_  = declare_parameter<double>("track_width_m", 0.385);
     wheel_base_m_deprecated_ = declare_parameter<double>("wheel_base_m", -1.0);
-    if (wheel_base_m_deprecated_ > 0.0) track_width_m_ = wheel_base_m_deprecated_;
+    if (wheel_base_m_deprecated_ > 0.0) {
+      track_width_m_ = wheel_base_m_deprecated_;
+    }
 
     wheel_radius_m_ = declare_parameter<double>("wheel_radius_m", 0.10);
     ticks_per_rev_  = declare_parameter<int64_t>("ticks_per_rev", 131000);
@@ -66,7 +70,8 @@ public:
     min_pwm_pct_      = declare_parameter<int>("min_pwm_pct", 8);
 
     // -------------------------
-    // PI gains
+    // PI gains (SIDE velocity control for skid-steer)
+    // units: kp [%/(m/s)], ki [%/(m/s*s)]
     // -------------------------
     vel_kp_ = declare_parameter<double>("vel_kp", 80.0);
     vel_ki_ = declare_parameter<double>("vel_ki", 30.0);
@@ -79,16 +84,17 @@ public:
     meas_lpf_alpha_ = declare_parameter<double>("meas_lpf_alpha", 0.2);
 
     // -------------------------
-    // Within-side sync
+    // Optional: within-side synchronization
     // -------------------------
     use_within_side_sync_ = declare_parameter<bool>("use_within_side_sync", true);
-    sync_k_ = declare_parameter<double>("sync_k", 15.0);
+    sync_k_ = declare_parameter<double>("sync_k", 15.0); // [%/(m/s)]
 
     // -------------------------
     // Debug
     // -------------------------
     debug_ = declare_parameter<bool>("debug", true);
 
+    // pubs/subs
     pub_wheel_cmd4_ = create_publisher<std_msgs::msg::Int16MultiArray>(out_topic_4_, 10);
     pub_wheel_cmd_lr_ = create_publisher<std_msgs::msg::Int16MultiArray>(out_topic_lr_, 10);
     pub_odom_      = create_publisher<nav_msgs::msg::Odometry>(odom_topic_, 10);
@@ -102,6 +108,7 @@ public:
       ticks_topic_, 10,
       [this](const base::msg::WheelTicks4::SharedPtr msg){ onTicks(*msg); });
 
+    // control loop timer
     timer_ = create_wall_timer(
       std::chrono::milliseconds(std::max(1, control_period_ms_)),
       std::bind(&KinematicsNode::controlLoop, this));
@@ -165,12 +172,14 @@ private:
     const double meters_per_tick =
       (2.0 * M_PI * wheel_radius_m_) / static_cast<double>(ticks_per_rev_);
 
+    // per-wheel distance + velocity
     double ds[4], v[4];
     for (size_t i = 0; i < 4; ++i) {
       ds[i] = static_cast<double>(d[i]) * meters_per_tick;
       v[i]  = ds[i] / dt;
     }
 
+    // low-pass filter per wheel
     if (!have_meas_) {
       for (size_t i = 0; i < 4; ++i) v_meas_[i] = v[i];
       have_meas_ = true;
@@ -182,6 +191,7 @@ private:
     }
     meas_time_ = t;
 
+    // ---- Odometry integration (from ds), skid-steer approximation using side averages
     const double dl = 0.5 * (ds[FL] + ds[RL]);
     const double dr = 0.5 * (ds[FR] + ds[RR]);
 
@@ -236,7 +246,9 @@ private:
   void controlLoop() {
     const rclcpp::Time now_t = now();
 
-    if (!have_cmd_ || (now_t - last_cmd_time_).nanoseconds() > (int64_t)cmd_timeout_ms_ * 1000000LL) {
+    // timeout -> stop + reset integrators
+    if (!have_cmd_ ||
+        (now_t - last_cmd_time_).nanoseconds() > (int64_t)cmd_timeout_ms_ * 1000000LL) {
       publishWheelCmd4(0, 0, 0, 0);
       publishWheelCmdLR(0, 0);
       iL_ = 0.0;
@@ -244,16 +256,20 @@ private:
       return;
     }
 
-    double v = last_cmd_.linear.x;
-    double w = last_cmd_.angular.z;
+    // desired body velocities
+    double v = last_cmd_.linear.x;   // m/s
+    double w = last_cmd_.angular.z;  // rad/s
 
+    // deadband on command
     if (std::fabs(v) < v_deadband_mps_) v = 0.0;
     if (std::fabs(w) < 1e-9) w = 0.0;
 
+    // side wheel setpoints [m/s]
     const double b = track_width_m_;
     const double vL_sp = v - w * (b * 0.5);
     const double vR_sp = v + w * (b * 0.5);
 
+    // Feedforward in [%]
     auto ffPct = [this](double v_side) -> double {
       if (!use_feedforward_ || v_max_mps_ <= 1e-9) return 0.0;
       return 100.0 * (v_side / v_max_mps_);
@@ -271,9 +287,11 @@ private:
       if (mag < (double)min_pwm_pct_) u_pct = s * (double)min_pwm_pct_;
     };
 
+    // measurement freshness
     const bool meas_fresh = have_meas_ &&
-      (now_t - meas_time_).nanoseconds() < (int64_t)500 * 1000000LL;
+      (now_t - meas_time_).nanoseconds() < (int64_t)500 * 1000000LL; // 500ms
 
+    // fallback to open-loop if no meas
     if (!use_closed_loop_ || !meas_fresh) {
       applyMinPwm(uL, vL_sp);
       applyMinPwm(uR, vR_sp);
@@ -303,6 +321,7 @@ private:
       return;
     }
 
+    // ---- CLOSED LOOP: regulate SIDE velocities
     const double vL_meas = 0.5 * (v_meas_[FL] + v_meas_[RL]);
     const double vR_meas = 0.5 * (v_meas_[FR] + v_meas_[RR]);
 
@@ -313,9 +332,11 @@ private:
 
     const double dt = std::max(1e-3, control_period_ms_ / 1000.0);
 
+    // tentative integrator update
     const double iL_new = clampd(iL_ + vel_ki_ * eL * dt, i_min_, i_max_);
     const double iR_new = clampd(iR_ + vel_ki_ * eR * dt, i_min_, i_max_);
 
+    // unsaturated outputs
     const double uL_unsat = uL + vel_kp_ * eL + iL_new;
     const double uR_unsat = uR + vel_kp_ * eR + iR_new;
 
@@ -338,6 +359,7 @@ private:
     applyMinPwm(uL, vL_sp);
     applyMinPwm(uR, vR_sp);
 
+    // Output redistribution within each side
     if (!use_within_side_sync_) {
       publishWheelCmd4(clampPctToInt16(uL), clampPctToInt16(uR),
                        clampPctToInt16(uL), clampPctToInt16(uR));
@@ -392,7 +414,9 @@ private:
     pub_wheel_cmd_lr_->publish(out);
   }
 
+  // -------------------------
   // Params
+  // -------------------------
   std::string cmd_topic_;
   std::string out_topic_4_;
   std::string out_topic_lr_;
@@ -432,7 +456,9 @@ private:
 
   bool debug_{true};
 
+  // -------------------------
   // ROS
+  // -------------------------
   rclcpp::Publisher<std_msgs::msg::Int16MultiArray>::SharedPtr pub_wheel_cmd4_;
   rclcpp::Publisher<std_msgs::msg::Int16MultiArray>::SharedPtr pub_wheel_cmd_lr_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_odom_;
@@ -463,7 +489,7 @@ private:
   double x_{0.0}, y_{0.0}, th_{0.0};
 };
 
-int main(int argc, char** argv){
+int main(int argc, char** argv) {
   rclcpp::init(argc, argv);
   rclcpp::spin(std::make_shared<KinematicsNode>());
   rclcpp::shutdown();
