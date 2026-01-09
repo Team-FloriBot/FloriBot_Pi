@@ -1,10 +1,11 @@
 kinematics_node:
   ros__parameters:
     # =========================
-    # Topics
+    # Topics (passend zu hardware_node + Code)
     # =========================
     cmd_vel_topic: /cmd_vel
-    wheel_cmd_topic: /base/wheel_cmd
+    wheel_cmd4_topic: /base/wheel_cmd4
+    wheel_cmd_topic: /base/wheel_cmd         # optional (Monitoring/Kompatibilität)
     wheel_ticks_topic: /base/wheel_ticks4
     odom_topic: /odom
 
@@ -17,8 +18,10 @@ kinematics_node:
 
     # =========================
     # Geometry / scaling
+    # wheel_base_m wird im Code als Spurbreite (links–rechts) verwendet.
+    # RR–RL = 0.385 m
     # =========================
-    wheel_base_m: 0.50
+    wheel_base_m: 0.385
     wheel_radius_m: 0.10
     ticks_per_rev: 131000
 
@@ -37,7 +40,6 @@ kinematics_node:
 
     # =========================
     # Deadbands / friction
-    # (bewusst größer für ruhigen Lauf)
     # =========================
     v_deadband_mps: 0.03
     pid_deadband_mps: 0.02
@@ -45,7 +47,6 @@ kinematics_node:
 
     # =========================
     # Velocity controller gains
-    # (nur P-Regler, bewusst weich)
     # =========================
     vel_kp: 25.0
     vel_ki: 0.0
