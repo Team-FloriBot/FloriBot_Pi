@@ -191,8 +191,8 @@ def main():
 
     # Testläufe
     #node.drive_circle(radius=0.5, v=1.8)
-    node.drive_straight(distance=3.0, v=12.2)
-    #node.rotate(n_rotations=1, omega=0.5)
+    #node.drive_straight(distance=3.0, v=12.2)
+    node.rotate(n_rotations=1, omega=1.5)
     #node.rotate(n_rotations=5, omega=0.5)
 
     node.destroy_node()
