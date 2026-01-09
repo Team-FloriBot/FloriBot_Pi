@@ -90,7 +90,7 @@ public:
     // This does NOT change the skid-steer kinematics (still regulates vL/vR),
     // it only redistributes effort within each side.
     // -------------------------
-    use_within_side_sync_ = declare_parameter<bool>("use_within_side_sync", false);
+    use_within_side_sync_ = declare_parameter<bool>("use_within_side_sync", true);
     sync_k_ = declare_parameter<double>("sync_k", 15.0); // [%/(m/s)]
 
     // -------------------------
