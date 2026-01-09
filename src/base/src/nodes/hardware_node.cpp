@@ -142,6 +142,7 @@ public:
     // Per-wheel PWM calibration (fixes different servo drivers)
     // us[ch] = pct * k_us_per_pct[ch] + neutral_us[ch]
     // If you don't set *_4 arrays, scalars below are used for all wheels.
+    // NOTE: For ROS2 parameters, integer arrays are int64_t. We store them as int64_t and cast later.
     // -------------------------
     k_us_per_pct_scalar_ = declare_parameter<double>("k_us_per_pct", 5.5);
     neutral_us_scalar_   = declare_parameter<int>("neutral_us", 1480);
@@ -153,19 +154,23 @@ public:
                          std::vector<double>{k_us_per_pct_scalar_, k_us_per_pct_scalar_,
                                              k_us_per_pct_scalar_, k_us_per_pct_scalar_},
                          k_us_per_pct_4_);
+
     set_or_default_array("neutral_us_4",
-                         std::vector<int64_t>{neutral_us_scalar_, neutral_us_scalar_,
-                                              neutral_us_scalar_, neutral_us_scalar_},
+                         std::vector<int64_t>{(int64_t)neutral_us_scalar_, (int64_t)neutral_us_scalar_,
+                                              (int64_t)neutral_us_scalar_, (int64_t)neutral_us_scalar_},
                          neutral_us_4_);
+
     set_or_default_array("min_us_4",
-                         std::vector<int64_t>{min_us_scalar_, min_us_scalar_, min_us_scalar_, min_us_scalar_},
+                         std::vector<int64_t>{(int64_t)min_us_scalar_, (int64_t)min_us_scalar_,
+                                              (int64_t)min_us_scalar_, (int64_t)min_us_scalar_},
                          min_us_4_);
+
     set_or_default_array("max_us_4",
-                         std::vector<int64_t>{max_us_scalar_, max_us_scalar_, max_us_scalar_, max_us_scalar_},
+                         std::vector<int64_t>{(int64_t)max_us_scalar_, (int64_t)max_us_scalar_,
+                                              (int64_t)max_us_scalar_, (int64_t)max_us_scalar_},
                          max_us_4_);
 
     // Optional per-wheel deadband in pct around 0 command: [fl, fr, rl, rr]
-    // If |pct| < deadband => 0. Helps when drivers differ in center jitter.
     set_or_default_array("deadband_pct_4",
                          std::vector<int64_t>{0, 0, 0, 0},
                          deadband_pct_4_);
@@ -246,8 +251,8 @@ public:
       (int)ignore_wheel_gains_, accel_, (int)prefer_cmd4_);
 
     RCLCPP_INFO(get_logger(),
-      "PWM calib (per wheel FL/FR/RL/RR): k_us_per_pct=[%.3f %.3f %.3f %.3f] neutral=[%d %d %d %d] "
-      "min_us=[%d %d %d %d] max_us=[%d %d %d %d] deadband_pct=[%d %d %d %d]",
+      "PWM calib (FL/FR/RL/RR): k=[%.3f %.3f %.3f %.3f] neutral=[%ld %ld %ld %ld] "
+      "min=[%ld %ld %ld %ld] max=[%ld %ld %ld %ld] deadband_pct=[%ld %ld %ld %ld]",
       k_us_per_pct_4_[0], k_us_per_pct_4_[1], k_us_per_pct_4_[2], k_us_per_pct_4_[3],
       neutral_us_4_[0], neutral_us_4_[1], neutral_us_4_[2], neutral_us_4_[3],
       min_us_4_[0], min_us_4_[1], min_us_4_[2], min_us_4_[3],
@@ -270,9 +275,6 @@ public:
 private:
   enum Wheel : size_t { FL=0, FR=1, RL=2, RR=3 };
 
-  // -------------------------
-  // Param helpers
-  // -------------------------
   template<typename T>
   void set_or_default_array(const std::string& name,
                             const std::vector<T>& default_vec,
@@ -291,10 +293,6 @@ private:
     return std::max(lo, std::min(v, hi));
   }
 
-  static double clamp_double(double v, double lo, double hi) {
-    return std::max(lo, std::min(v, hi));
-  }
-
   int apply_gain(int pct, double gain) const {
     const double p = static_cast<double>(pct) * gain;
     return clamp_int(static_cast<int>(std::lround(p)), pct_min_, pct_max_);
@@ -307,8 +305,8 @@ private:
     const double us_f = static_cast<double>(pct) * k + n;
     int us = static_cast<int>(std::lround(us_f));
 
-    const int min_us = min_us_4_[wheel_idx];
-    const int max_us = max_us_4_[wheel_idx];
+    const int min_us = (int)min_us_4_[wheel_idx];
+    const int max_us = (int)max_us_4_[wheel_idx];
     return clamp_int(us, min_us, max_us);
   }
 
@@ -330,8 +328,7 @@ private:
   }
 
   void apply_wheel(size_t wheel_idx, int servo_channel, int pct) {
-    // optional deadband near zero to prevent driver mismatch around neutral
-    const int db = deadband_pct_4_[wheel_idx];
+    const int db = (int)deadband_pct_4_[wheel_idx];
     if (std::abs(pct) < db) pct = 0;
 
     pct = clamp_int(pct, pct_min_, pct_max_);
@@ -340,8 +337,6 @@ private:
   }
 
   void stop_all() {
-    for (int ch = 0; ch < 4; ++ch) write_channel_pulse(ch, neutral_us_scalar_);
-    // safer: also write per-wheel neutral to the mapped channels
     apply_all_wheels(0, 0, 0, 0);
   }
 
@@ -394,13 +389,8 @@ private:
     const int left_pct_in  = clamp_int((int)msg->data[0], pct_min_, pct_max_);
     const int right_pct_in = clamp_int((int)msg->data[1], pct_min_, pct_max_);
 
-    const int fl = left_pct_in;
-    const int rl = left_pct_in;
-    const int fr = right_pct_in;
-    const int rr = right_pct_in;
-
     try {
-      apply_all_wheels(fl, fr, rl, rr);
+      apply_all_wheels(left_pct_in, right_pct_in, left_pct_in, right_pct_in);
       last_cmd_time_ = now();
     } catch (const std::exception& e) {
       RCLCPP_ERROR(get_logger(), "I2C write failed (LR): %s", e.what());
@@ -428,7 +418,7 @@ private:
     const auto dt = now() - last_cmd_time_;
     const auto timeout = rclcpp::Duration(0, static_cast<int64_t>(watchdog_ms_) * 1000000LL);
     if (dt > timeout) {
-      try { apply_all_wheels(0,0,0,0); } catch (const std::exception& e) {
+      try { stop_all(); } catch (const std::exception& e) {
         RCLCPP_ERROR(get_logger(), "Watchdog stop failed: %s", e.what());
       }
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "Watchdog timeout -> STOP");
@@ -527,17 +517,17 @@ private:
   std::array<double,4> wheel_gains_{ {1.0, 1.0, 1.0, 1.0} }; // fl, fr, rl, rr
   bool ignore_wheel_gains_{true};
 
-  // PWM calibration (scalar defaults + per-wheel arrays)
+  // PWM calibration
   double k_us_per_pct_scalar_{5.5};
   int neutral_us_scalar_{1480};
   int min_us_scalar_{900};
   int max_us_scalar_{2100};
 
-  std::array<double,4> k_us_per_pct_4_{ {5.5, 5.5, 5.5, 5.5} };
-  std::array<int,4>    neutral_us_4_{ {1480,1480,1480,1480} };
-  std::array<int,4>    min_us_4_{ {900,900,900,900} };
-  std::array<int,4>    max_us_4_{ {2100,2100,2100,2100} };
-  std::array<int,4>    deadband_pct_4_{ {0,0,0,0} };
+  std::array<double,4>  k_us_per_pct_4_{ {5.5, 5.5, 5.5, 5.5} };
+  std::array<int64_t,4> neutral_us_4_{ {1480,1480,1480,1480} };
+  std::array<int64_t,4> min_us_4_{ {900,900,900,900} };
+  std::array<int64_t,4> max_us_4_{ {2100,2100,2100,2100} };
+  std::array<int64_t,4> deadband_pct_4_{ {0,0,0,0} };
 
   int pct_min_{-100};
   int pct_max_{100};
