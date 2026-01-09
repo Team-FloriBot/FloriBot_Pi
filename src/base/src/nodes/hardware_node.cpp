@@ -498,4 +498,43 @@ private:
   int min_us_scalar_{900};
   int max_us_scalar_{2100};
 
-  std::array<double,4>  k_us_per_p_
+  std::array<double,4>  k_us_per_pct_4_{ {5.5, 5.5, 5.5, 5.5} };
+  std::array<int64_t,4> neutral_us_4_{ {1480,1480,1480,1480} };
+  std::array<int64_t,4> min_us_4_{ {900,900,900,900} };
+  std::array<int64_t,4> max_us_4_{ {2100,2100,2100,2100} };
+  std::array<int64_t,4> deadband_pct_4_{ {0,0,0,0} };
+
+  int pct_min_{-100};
+  int pct_max_{100};
+  int accel_{0};
+  int watchdog_ms_{300};
+
+  bool prefer_cmd4_{true};
+
+  int phidget_serial_{-1};
+  std::array<int,4> encoder_channels_{ {2, 3, 0, 1} };
+  std::array<bool,4> invert_{ {false,false,false,false} };
+  bool invert_fl_{true}, invert_fr_{false}, invert_rl_{true}, invert_rr_{false};
+  int publish_ticks_ms_{20};
+
+  std::array<PhidgetEncoderHandle,4> enc_{ {nullptr,nullptr,nullptr,nullptr} };
+  std::array<std::atomic<int64_t>,4> ticks_{};
+
+  rclcpp::Time last_cmd_time_;
+  rclcpp::Time last_cmd4_time_;
+  rclcpp::TimerBase::SharedPtr timer_watchdog_;
+  rclcpp::TimerBase::SharedPtr timer_ticks_;
+
+  rclcpp::Subscription<std_msgs::msg::Int16MultiArray>::SharedPtr sub_lr_;
+  rclcpp::Subscription<std_msgs::msg::Int16MultiArray>::SharedPtr sub_4_;
+  rclcpp::Publisher<base::msg::WheelTicks4>::SharedPtr pub_ticks_;
+
+  std::unique_ptr<NxtServoI2C> nxt_;
+};
+
+int main(int argc, char** argv) {
+  rclcpp::init(argc, argv);
+  rclcpp::spin(std::make_shared<HardwareNode>());
+  rclcpp::shutdown();
+  return 0;
+}
