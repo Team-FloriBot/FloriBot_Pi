@@ -10,7 +10,6 @@
 #include <tf2_ros/transform_broadcaster.h>
 
 #include <algorithm>
-#include <array>
 #include <cmath>
 #include <cstdint>
 #include <string>
@@ -38,14 +37,10 @@ public:
 
     // -------------------------
     // Geometry / scaling
-    // track_width_m = Spurbreite (links-rechts).
-    // wheel_base_m is deprecated; only used if set > 0.
     // -------------------------
     track_width_m_  = declare_parameter<double>("track_width_m", 0.385);
     wheel_base_m_deprecated_ = declare_parameter<double>("wheel_base_m", -1.0);
-    if (wheel_base_m_deprecated_ > 0.0) {
-      track_width_m_ = wheel_base_m_deprecated_;
-    }
+    if (wheel_base_m_deprecated_ > 0.0) track_width_m_ = wheel_base_m_deprecated_;
 
     wheel_radius_m_ = declare_parameter<double>("wheel_radius_m", 0.10);
     ticks_per_rev_  = declare_parameter<int64_t>("ticks_per_rev", 131000);
@@ -71,8 +66,7 @@ public:
     min_pwm_pct_      = declare_parameter<int>("min_pwm_pct", 8);
 
     // -------------------------
-    // PI gains (SIDE velocity control for skid-steer)
-    // units: kp [%/(m/s)], ki [%/(m/s*s)]
+    // PI gains
     // -------------------------
     vel_kp_ = declare_parameter<double>("vel_kp", 80.0);
     vel_ki_ = declare_parameter<double>("vel_ki", 30.0);
@@ -85,17 +79,16 @@ public:
     meas_lpf_alpha_ = declare_parameter<double>("meas_lpf_alpha", 0.2);
 
     // -------------------------
-    // Within-side sync (important for different drivers per wheel)
+    // Within-side sync
     // -------------------------
     use_within_side_sync_ = declare_parameter<bool>("use_within_side_sync", true);
-    sync_k_ = declare_parameter<double>("sync_k", 15.0); // [%/(m/s)]
+    sync_k_ = declare_parameter<double>("sync_k", 15.0);
 
     // -------------------------
     // Debug
     // -------------------------
     debug_ = declare_parameter<bool>("debug", true);
 
-    // pubs/subs
     pub_wheel_cmd4_ = create_publisher<std_msgs::msg::Int16MultiArray>(out_topic_4_, 10);
     pub_wheel_cmd_lr_ = create_publisher<std_msgs::msg::Int16MultiArray>(out_topic_lr_, 10);
     pub_odom_      = create_publisher<nav_msgs::msg::Odometry>(odom_topic_, 10);
@@ -109,7 +102,6 @@ public:
       ticks_topic_, 10,
       [this](const base::msg::WheelTicks4::SharedPtr msg){ onTicks(*msg); });
 
-    // control loop timer
     timer_ = create_wall_timer(
       std::chrono::milliseconds(std::max(1, control_period_ms_)),
       std::bind(&KinematicsNode::controlLoop, this));
@@ -173,14 +165,12 @@ private:
     const double meters_per_tick =
       (2.0 * M_PI * wheel_radius_m_) / static_cast<double>(ticks_per_rev_);
 
-    // per-wheel distance + velocity
     double ds[4], v[4];
     for (size_t i = 0; i < 4; ++i) {
       ds[i] = static_cast<double>(d[i]) * meters_per_tick;
       v[i]  = ds[i] / dt;
     }
 
-    // low-pass filter per wheel
     if (!have_meas_) {
       for (size_t i = 0; i < 4; ++i) v_meas_[i] = v[i];
       have_meas_ = true;
@@ -192,7 +182,6 @@ private:
     }
     meas_time_ = t;
 
-    // ---- Odometry integration (from ds), skid-steer approximation using side averages
     const double dl = 0.5 * (ds[FL] + ds[RL]);
     const double dr = 0.5 * (ds[FR] + ds[RR]);
 
@@ -247,7 +236,6 @@ private:
   void controlLoop() {
     const rclcpp::Time now_t = now();
 
-    // timeout -> stop + reset integrators
     if (!have_cmd_ || (now_t - last_cmd_time_).nanoseconds() > (int64_t)cmd_timeout_ms_ * 1000000LL) {
       publishWheelCmd4(0, 0, 0, 0);
       publishWheelCmdLR(0, 0);
@@ -256,20 +244,16 @@ private:
       return;
     }
 
-    // desired body velocities
-    double v = last_cmd_.linear.x;   // m/s
-    double w = last_cmd_.angular.z;  // rad/s
+    double v = last_cmd_.linear.x;
+    double w = last_cmd_.angular.z;
 
-    // deadband on command
     if (std::fabs(v) < v_deadband_mps_) v = 0.0;
     if (std::fabs(w) < 1e-9) w = 0.0;
 
-    // side wheel setpoints [m/s] using track width b
     const double b = track_width_m_;
     const double vL_sp = v - w * (b * 0.5);
     const double vR_sp = v + w * (b * 0.5);
 
-    // Feedforward in [%]
     auto ffPct = [this](double v_side) -> double {
       if (!use_feedforward_ || v_max_mps_ <= 1e-9) return 0.0;
       return 100.0 * (v_side / v_max_mps_);
@@ -278,7 +262,6 @@ private:
     double uL = ffPct(vL_sp);
     double uR = ffPct(vR_sp);
 
-    // helper: keep minimal PWM for friction / ESC deadband
     auto applyMinPwm = [this](double &u_pct, double v_sp_side) {
       if (min_pwm_pct_ <= 0) return;
       if (std::fabs(v_sp_side) < v_deadband_mps_) return;
@@ -288,11 +271,9 @@ private:
       if (mag < (double)min_pwm_pct_) u_pct = s * (double)min_pwm_pct_;
     };
 
-    // Need measurements; if none yet, fallback to open-loop
     const bool meas_fresh = have_meas_ &&
-      (now_t - meas_time_).nanoseconds() < (int64_t)500 * 1000000LL; // 500ms
+      (now_t - meas_time_).nanoseconds() < (int64_t)500 * 1000000LL;
 
-    // Open-loop mode or missing measurements
     if (!use_closed_loop_ || !meas_fresh) {
       applyMinPwm(uL, vL_sp);
       applyMinPwm(uR, vR_sp);
@@ -322,7 +303,6 @@ private:
       return;
     }
 
-    // ---- SKID-STEER: regulate SIDE velocities, not per-wheel
     const double vL_meas = 0.5 * (v_meas_[FL] + v_meas_[RL]);
     const double vR_meas = 0.5 * (v_meas_[FR] + v_meas_[RR]);
 
@@ -333,11 +313,9 @@ private:
 
     const double dt = std::max(1e-3, control_period_ms_ / 1000.0);
 
-    // tentative integrator update
     const double iL_new = clampd(iL_ + vel_ki_ * eL * dt, i_min_, i_max_);
     const double iR_new = clampd(iR_ + vel_ki_ * eR * dt, i_min_, i_max_);
 
-    // unsaturated outputs
     const double uL_unsat = uL + vel_kp_ * eL + iL_new;
     const double uR_unsat = uR + vel_kp_ * eR + iR_new;
 
@@ -360,7 +338,6 @@ private:
     applyMinPwm(uL, vL_sp);
     applyMinPwm(uR, vR_sp);
 
-    // Output redistribution within each side to compensate different drivers
     if (!use_within_side_sync_) {
       publishWheelCmd4(clampPctToInt16(uL), clampPctToInt16(uR),
                        clampPctToInt16(uL), clampPctToInt16(uR));
@@ -415,9 +392,7 @@ private:
     pub_wheel_cmd_lr_->publish(out);
   }
 
-  // -------------------------
   // Params
-  // -------------------------
   std::string cmd_topic_;
   std::string out_topic_4_;
   std::string out_topic_lr_;
@@ -457,9 +432,7 @@ private:
 
   bool debug_{true};
 
-  // -------------------------
   // ROS
-  // -------------------------
   rclcpp::Publisher<std_msgs::msg::Int16MultiArray>::SharedPtr pub_wheel_cmd4_;
   rclcpp::Publisher<std_msgs::msg::Int16MultiArray>::SharedPtr pub_wheel_cmd_lr_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_odom_;
@@ -482,7 +455,7 @@ private:
   double v_meas_[4]{0.0,0.0,0.0,0.0};
   rclcpp::Time meas_time_{0,0,RCL_ROS_TIME};
 
-  // SIDE PI integrators (skid-steer)
+  // SIDE PI integrators
   double iL_{0.0};
   double iR_{0.0};
 
