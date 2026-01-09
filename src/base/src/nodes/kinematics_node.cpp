@@ -25,7 +25,7 @@ public:
     // -------------------------
     cmd_topic_    = declare_parameter<std::string>("cmd_vel_topic", "/cmd_vel");
     out_topic_4_  = declare_parameter<std::string>("wheel_cmd4_topic", "/base/wheel_cmd4");
-    out_topic_lr_ = declare_parameter<std::string>("wheel_cmd_topic",  "/base/wheel_cmd"); // optional fallback/monitoring
+    out_topic_lr_ = declare_parameter<std::string>("wheel_cmd_topic",  "/base/wheel_cmd");
     ticks_topic_  = declare_parameter<std::string>("wheel_ticks_topic", "/base/wheel_ticks4");
     odom_topic_   = declare_parameter<std::string>("odom_topic", "/odom");
 
@@ -38,15 +38,14 @@ public:
 
     // -------------------------
     // Geometry / scaling
-    // track_width_m = Spurbreite (links-rechts), NICHT Radstand.
-    // Backward compatibility: wheel_base_m (deprecated) can still be set.
-    // NOTE: original code always overwrote track_width_m with wheel_base_m default.
-    // We keep behavior (wheel_base_m overrides) but do it safely.
+    // track_width_m = Spurbreite (links-rechts).
+    // wheel_base_m is deprecated; only used if set > 0.
     // -------------------------
     track_width_m_  = declare_parameter<double>("track_width_m", 0.385);
-    wheel_base_m_deprecated_ = declare_parameter<double>("wheel_base_m", track_width_m_);
-    // Keep backward-compatible override:
-    track_width_m_ = wheel_base_m_deprecated_;
+    wheel_base_m_deprecated_ = declare_parameter<double>("wheel_base_m", -1.0);
+    if (wheel_base_m_deprecated_ > 0.0) {
+      track_width_m_ = wheel_base_m_deprecated_;
+    }
 
     wheel_radius_m_ = declare_parameter<double>("wheel_radius_m", 0.10);
     ticks_per_rev_  = declare_parameter<int64_t>("ticks_per_rev", 131000);
@@ -86,9 +85,7 @@ public:
     meas_lpf_alpha_ = declare_parameter<double>("meas_lpf_alpha", 0.2);
 
     // -------------------------
-    // Optional: within-side synchronization (reduces FL/RL and FR/RR divergence)
-    // This does NOT change the skid-steer kinematics (still regulates vL/vR),
-    // it only redistributes effort within each side.
+    // Within-side sync (important for different drivers per wheel)
     // -------------------------
     use_within_side_sync_ = declare_parameter<bool>("use_within_side_sync", true);
     sync_k_ = declare_parameter<double>("sync_k", 15.0); // [%/(m/s)]
@@ -281,8 +278,22 @@ private:
     double uL = ffPct(vL_sp);
     double uR = ffPct(vR_sp);
 
-    // Open-loop mode: apply minimal PWM and output equal per side
-    if (!use_closed_loop_) {
+    // helper: keep minimal PWM for friction / ESC deadband
+    auto applyMinPwm = [this](double &u_pct, double v_sp_side) {
+      if (min_pwm_pct_ <= 0) return;
+      if (std::fabs(v_sp_side) < v_deadband_mps_) return;
+      if (std::fabs(u_pct) < 1e-9) return;
+      const double s = (u_pct >= 0.0) ? 1.0 : -1.0;
+      const double mag = std::fabs(u_pct);
+      if (mag < (double)min_pwm_pct_) u_pct = s * (double)min_pwm_pct_;
+    };
+
+    // Need measurements; if none yet, fallback to open-loop
+    const bool meas_fresh = have_meas_ &&
+      (now_t - meas_time_).nanoseconds() < (int64_t)500 * 1000000LL; // 500ms
+
+    // Open-loop mode or missing measurements
+    if (!use_closed_loop_ || !meas_fresh) {
       applyMinPwm(uL, vL_sp);
       applyMinPwm(uR, vR_sp);
 
@@ -290,30 +301,23 @@ private:
         publishWheelCmd4(clampPctToInt16(uL), clampPctToInt16(uR),
                          clampPctToInt16(uL), clampPctToInt16(uR));
       } else {
-        // sync around open-loop commands (optional)
         const double dL = (v_meas_[FL] - v_meas_[RL]);
         const double dR = (v_meas_[FR] - v_meas_[RR]);
+
         double uFL = clampd(uL - sync_k_ * dL, -100.0, 100.0);
         double uRL = clampd(uL + sync_k_ * dL, -100.0, 100.0);
         double uFR = clampd(uR - sync_k_ * dR, -100.0, 100.0);
         double uRR = clampd(uR + sync_k_ * dR, -100.0, 100.0);
+
+        applyMinPwm(uFL, vL_sp);
+        applyMinPwm(uRL, vL_sp);
+        applyMinPwm(uFR, vR_sp);
+        applyMinPwm(uRR, vR_sp);
+
         publishWheelCmd4(clampPctToInt16(uFL), clampPctToInt16(uFR),
                          clampPctToInt16(uRL), clampPctToInt16(uRR));
       }
 
-      publishWheelCmdLR(clampPctToInt16(uL), clampPctToInt16(uR));
-      return;
-    }
-
-    // Need measurements; if none yet, fallback to open-loop
-    const bool meas_fresh = have_meas_ &&
-      (now_t - meas_time_).nanoseconds() < (int64_t)500 * 1000000LL; // 500ms
-    if (!meas_fresh) {
-      applyMinPwm(uL, vL_sp);
-      applyMinPwm(uR, vR_sp);
-
-      publishWheelCmd4(clampPctToInt16(uL), clampPctToInt16(uR),
-                       clampPctToInt16(uL), clampPctToInt16(uR));
       publishWheelCmdLR(clampPctToInt16(uL), clampPctToInt16(uR));
       return;
     }
@@ -356,9 +360,7 @@ private:
     applyMinPwm(uL, vL_sp);
     applyMinPwm(uR, vR_sp);
 
-    // Output:
-    // - default: equal command per side
-    // - optional: redistribute within side using measured wheel mismatch
+    // Output redistribution within each side to compensate different drivers
     if (!use_within_side_sync_) {
       publishWheelCmd4(clampPctToInt16(uL), clampPctToInt16(uR),
                        clampPctToInt16(uL), clampPctToInt16(uR));
@@ -395,15 +397,6 @@ private:
     }
   }
 
-  void applyMinPwm(double &u_pct, double v_sp) const {
-    if (min_pwm_pct_ <= 0) return;
-    if (std::fabs(v_sp) < v_deadband_mps_) return;
-    if (std::fabs(u_pct) < 1e-6) return;
-    const double s = (u_pct >= 0.0) ? 1.0 : -1.0;
-    const double mag = std::fabs(u_pct);
-    if (mag < (double)min_pwm_pct_) u_pct = s * (double)min_pwm_pct_;
-  }
-
   void publishWheelCmd4(int16_t fl, int16_t fr, int16_t rl, int16_t rr) {
     std_msgs::msg::Int16MultiArray out;
     out.data.resize(4);
@@ -436,7 +429,7 @@ private:
   bool publish_tf_{true};
 
   double track_width_m_{0.385};
-  double wheel_base_m_deprecated_{0.385};
+  double wheel_base_m_deprecated_{-1.0};
 
   double wheel_radius_m_{0.10};
   int64_t ticks_per_rev_{131000};
@@ -459,7 +452,7 @@ private:
 
   double meas_lpf_alpha_{0.2};
 
-  bool use_within_side_sync_{false};
+  bool use_within_side_sync_{true};
   double sync_k_{15.0};
 
   bool debug_{true};
