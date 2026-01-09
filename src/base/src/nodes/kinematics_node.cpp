@@ -203,7 +203,7 @@ private:
 
     const double ds_body  = 0.5 * (dr + dl);
     const double b = track_width_m_;
-    const double dth = (b > 1e-9) ? ((dr + dl) / b) : 0.0;
+    const double dth = (b > 1e-9) ? ((dr - dl) / b) : 0.0;
 
     const double th_mid = th_ + 0.5 * dth;
     x_  += ds_body * std::cos(th_mid);
