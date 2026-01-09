@@ -21,7 +21,7 @@ hardware_node:
     wheel_channels: [2, 3, 0, 1]   # [fl, fr, rl, rr]
 
     # Wheel-Gains (werden im Regelbetrieb ignoriert)
-    wheel_gains: [0.812, 1.309, 1.231, 0.764]]
+    wheel_gains: [0.812, 1.309, 1.231, 0.764]
     ignore_wheel_gains: false
 
     # PWM Mapping: us = pct*k + neutral
