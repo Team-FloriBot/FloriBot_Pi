@@ -17,42 +17,35 @@ kinematics_node:
     publish_tf: true
 
     # =========================
-    # Geometry / scaling
-    # Spurbreite links–rechts (track width)
+    # Geometry
     # =========================
     track_width_m: 0.385
-    # optional (deprecated override im Code vorhanden):
     wheel_base_m: 0.385
-
     wheel_radius_m: 0.10
     ticks_per_rev: 131000
 
     # =========================
-    # Control loop & safety
+    # Timing
     # =========================
     control_period_ms: 20
     cmd_timeout_ms: 300
 
     # =========================
-    # Closed-loop control
+    # Control
     # =========================
     use_closed_loop: true
     use_feedforward: true
-
-    # Aggressiveres Feedforward (mehr PWM bei gleichem Soll)
     v_max_mps: 0.4
 
     # =========================
-    # Deadbands / friction
+    # Deadbands
     # =========================
     v_deadband_mps: 0.03
     pid_deadband_mps: 0.02
-
-    # Mindest-PWM gegen Haftreibung (wichtig für Drehung auf der Stelle)
     min_pwm_pct: 12
 
     # =========================
-    # SIDE velocity controller gains (Skid-Steer)
+    # PI-Regler (SIDE)
     # =========================
     vel_kp: 35.0
     vel_ki: 10.0
@@ -60,12 +53,12 @@ kinematics_node:
     i_max: 40.0
 
     # =========================
-    # Measurement filtering
+    # Filter
     # =========================
     meas_lpf_alpha: 0.10
 
     # =========================
-    # Optional: innerhalb einer Seite angleichen (nur wenn aktiviert)
+    # Seiten-Synchronisation
     # =========================
     use_within_side_sync: true
     sync_k: 45.0
