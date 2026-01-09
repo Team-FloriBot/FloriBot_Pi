@@ -40,11 +40,12 @@ public:
     // Geometry / scaling
     // track_width_m = Spurbreite (links-rechts), NICHT Radstand.
     // Backward compatibility: wheel_base_m (deprecated) can still be set.
+    // NOTE: original code always overwrote track_width_m with wheel_base_m default.
+    // We keep behavior (wheel_base_m overrides) but do it safely.
     // -------------------------
     track_width_m_  = declare_parameter<double>("track_width_m", 0.385);
     wheel_base_m_deprecated_ = declare_parameter<double>("wheel_base_m", track_width_m_);
-    // If user still sets wheel_base_m explicitly, it overrides track_width_m.
-    // (This avoids silent mismatch when old YAML is used.)
+    // Keep backward-compatible override:
     track_width_m_ = wheel_base_m_deprecated_;
 
     wheel_radius_m_ = declare_parameter<double>("wheel_radius_m", 0.10);
@@ -71,7 +72,7 @@ public:
     min_pwm_pct_      = declare_parameter<int>("min_pwm_pct", 8);
 
     // -------------------------
-    // PI gains (wheel velocity control)
+    // PI gains (SIDE velocity control for skid-steer)
     // units: kp [%/(m/s)], ki [%/(m/s*s)]
     // -------------------------
     vel_kp_ = declare_parameter<double>("vel_kp", 80.0);
@@ -83,6 +84,14 @@ public:
     // Measurement filtering
     // -------------------------
     meas_lpf_alpha_ = declare_parameter<double>("meas_lpf_alpha", 0.2);
+
+    // -------------------------
+    // Optional: within-side synchronization (reduces FL/RL and FR/RR divergence)
+    // This does NOT change the skid-steer kinematics (still regulates vL/vR),
+    // it only redistributes effort within each side.
+    // -------------------------
+    use_within_side_sync_ = declare_parameter<bool>("use_within_side_sync", false);
+    sync_k_ = declare_parameter<double>("sync_k", 15.0); // [%/(m/s)]
 
     // -------------------------
     // Debug
@@ -109,11 +118,12 @@ public:
       std::bind(&KinematicsNode::controlLoop, this));
 
     RCLCPP_INFO(get_logger(),
-      "KinematicsNode started | closed_loop=%d feedforward=%d period=%dms timeout=%dms | "
-      "track_width=%.3f r=%.3f ticks_per_rev=%ld v_max=%.3f | out4=%s",
+      "KinematicsNode started | skid_steer SIDE-PI | closed_loop=%d feedforward=%d period=%dms timeout=%dms | "
+      "track_width=%.3f r=%.3f ticks_per_rev=%ld v_max=%.3f | out4=%s | sync=%d k=%.2f",
       (int)use_closed_loop_, (int)use_feedforward_, control_period_ms_, cmd_timeout_ms_,
       track_width_m_, wheel_radius_m_, (long)ticks_per_rev_, v_max_mps_,
-      out_topic_4_.c_str());
+      out_topic_4_.c_str(),
+      (int)use_within_side_sync_, sync_k_);
   }
 
 private:
@@ -185,7 +195,7 @@ private:
     }
     meas_time_ = t;
 
-    // ---- Odometry integration (from ds), differential-drive using side averages
+    // ---- Odometry integration (from ds), skid-steer approximation using side averages
     const double dl = 0.5 * (ds[FL] + ds[RL]);
     const double dr = 0.5 * (ds[FR] + ds[RR]);
 
@@ -244,7 +254,8 @@ private:
     if (!have_cmd_ || (now_t - last_cmd_time_).nanoseconds() > (int64_t)cmd_timeout_ms_ * 1000000LL) {
       publishWheelCmd4(0, 0, 0, 0);
       publishWheelCmdLR(0, 0);
-      for (double &ii : i_) ii = 0.0;
+      iL_ = 0.0;
+      iR_ = 0.0;
       return;
     }
 
@@ -261,26 +272,36 @@ private:
     const double vL_sp = v - w * (b * 0.5);
     const double vR_sp = v + w * (b * 0.5);
 
-    // per-wheel setpoints: enforce pair equality by construction
-    double v_sp[4];
-    v_sp[FL] = vL_sp;
-    v_sp[RL] = vL_sp;
-    v_sp[FR] = vR_sp;
-    v_sp[RR] = vR_sp;
-
-    auto ffPct = [this](double v_wheel) -> double {
+    // Feedforward in [%]
+    auto ffPct = [this](double v_side) -> double {
       if (!use_feedforward_ || v_max_mps_ <= 1e-9) return 0.0;
-      return 100.0 * (v_wheel / v_max_mps_);
+      return 100.0 * (v_side / v_max_mps_);
     };
 
-    double u[4];
-    for (size_t i = 0; i < 4; ++i) u[i] = ffPct(v_sp[i]);
+    double uL = ffPct(vL_sp);
+    double uR = ffPct(vR_sp);
 
+    // Open-loop mode: apply minimal PWM and output equal per side
     if (!use_closed_loop_) {
-      for (size_t i = 0; i < 4; ++i) applyMinPwm(u[i], v_sp[i]);
-      publishWheelCmd4(clampPctToInt16(u[FL]), clampPctToInt16(u[FR]),
-                       clampPctToInt16(u[RL]), clampPctToInt16(u[RR]));
-      publishWheelCmdLR(clampPctToInt16(u[FL]), clampPctToInt16(u[FR]));
+      applyMinPwm(uL, vL_sp);
+      applyMinPwm(uR, vR_sp);
+
+      if (!use_within_side_sync_) {
+        publishWheelCmd4(clampPctToInt16(uL), clampPctToInt16(uR),
+                         clampPctToInt16(uL), clampPctToInt16(uR));
+      } else {
+        // sync around open-loop commands (optional)
+        const double dL = (v_meas_[FL] - v_meas_[RL]);
+        const double dR = (v_meas_[FR] - v_meas_[RR]);
+        double uFL = clampd(uL - sync_k_ * dL, -100.0, 100.0);
+        double uRL = clampd(uL + sync_k_ * dL, -100.0, 100.0);
+        double uFR = clampd(uR - sync_k_ * dR, -100.0, 100.0);
+        double uRR = clampd(uR + sync_k_ * dR, -100.0, 100.0);
+        publishWheelCmd4(clampPctToInt16(uFL), clampPctToInt16(uFR),
+                         clampPctToInt16(uRL), clampPctToInt16(uRR));
+      }
+
+      publishWheelCmdLR(clampPctToInt16(uL), clampPctToInt16(uR));
       return;
     }
 
@@ -288,35 +309,36 @@ private:
     const bool meas_fresh = have_meas_ &&
       (now_t - meas_time_).nanoseconds() < (int64_t)500 * 1000000LL; // 500ms
     if (!meas_fresh) {
-      for (size_t i = 0; i < 4; ++i) applyMinPwm(u[i], v_sp[i]);
-      publishWheelCmd4(clampPctToInt16(u[FL]), clampPctToInt16(u[FR]),
-                       clampPctToInt16(u[RL]), clampPctToInt16(u[RR]));
-      publishWheelCmdLR(clampPctToInt16(u[FL]), clampPctToInt16(u[FR]));
+      applyMinPwm(uL, vL_sp);
+      applyMinPwm(uR, vR_sp);
+
+      publishWheelCmd4(clampPctToInt16(uL), clampPctToInt16(uR),
+                       clampPctToInt16(uL), clampPctToInt16(uR));
+      publishWheelCmdLR(clampPctToInt16(uL), clampPctToInt16(uR));
       return;
     }
 
-    // PI control in [%] per wheel
+    // ---- SKID-STEER: regulate SIDE velocities, not per-wheel
+    const double vL_meas = 0.5 * (v_meas_[FL] + v_meas_[RL]);
+    const double vR_meas = 0.5 * (v_meas_[FR] + v_meas_[RR]);
+
+    double eL = vL_sp - vL_meas;
+    double eR = vR_sp - vR_meas;
+    if (std::fabs(eL) < pid_deadband_mps_) eL = 0.0;
+    if (std::fabs(eR) < pid_deadband_mps_) eR = 0.0;
+
     const double dt = std::max(1e-3, control_period_ms_ / 1000.0);
 
-    double e[4];
-    for (size_t i = 0; i < 4; ++i) {
-      e[i] = v_sp[i] - v_meas_[i];
-      if (std::fabs(e[i]) < pid_deadband_mps_) e[i] = 0.0;
-    }
-
     // tentative integrator update
-    double i_new[4];
-    for (size_t i = 0; i < 4; ++i) {
-      i_new[i] = clampd(i_[i] + vel_ki_ * e[i] * dt, i_min_, i_max_);
-    }
+    const double iL_new = clampd(iL_ + vel_ki_ * eL * dt, i_min_, i_max_);
+    const double iR_new = clampd(iR_ + vel_ki_ * eR * dt, i_min_, i_max_);
 
     // unsaturated outputs
-    double u_unsat[4], u_sat[4];
-    for (size_t i = 0; i < 4; ++i) {
-      const double p = vel_kp_ * e[i];
-      u_unsat[i] = u[i] + p + i_new[i];
-      u_sat[i]   = clampd(u_unsat[i], -100.0, 100.0);
-    }
+    const double uL_unsat = uL + vel_kp_ * eL + iL_new;
+    const double uR_unsat = uR + vel_kp_ * eR + iR_new;
+
+    double uL_sat = clampd(uL_unsat, -100.0, 100.0);
+    double uR_sat = clampd(uR_unsat, -100.0, 100.0);
 
     auto acceptI = [](double u_unsat, double u_sat, double err) {
       if (u_unsat == u_sat) return true;
@@ -325,27 +347,51 @@ private:
       return true;
     };
 
-    for (size_t i = 0; i < 4; ++i) {
-      if (acceptI(u_unsat[i], u_sat[i], e[i])) i_[i] = i_new[i];
-      u[i] = u_sat[i];
-      applyMinPwm(u[i], v_sp[i]);
+    if (acceptI(uL_unsat, uL_sat, eL)) iL_ = iL_new;
+    if (acceptI(uR_unsat, uR_sat, eR)) iR_ = iR_new;
+
+    uL = uL_sat;
+    uR = uR_sat;
+
+    applyMinPwm(uL, vL_sp);
+    applyMinPwm(uR, vR_sp);
+
+    // Output:
+    // - default: equal command per side
+    // - optional: redistribute within side using measured wheel mismatch
+    if (!use_within_side_sync_) {
+      publishWheelCmd4(clampPctToInt16(uL), clampPctToInt16(uR),
+                       clampPctToInt16(uL), clampPctToInt16(uR));
+    } else {
+      const double dL = (v_meas_[FL] - v_meas_[RL]);
+      const double dR = (v_meas_[FR] - v_meas_[RR]);
+
+      double uFL = clampd(uL - sync_k_ * dL, -100.0, 100.0);
+      double uRL = clampd(uL + sync_k_ * dL, -100.0, 100.0);
+      double uFR = clampd(uR - sync_k_ * dR, -100.0, 100.0);
+      double uRR = clampd(uR + sync_k_ * dR, -100.0, 100.0);
+
+      applyMinPwm(uFL, vL_sp);
+      applyMinPwm(uRL, vL_sp);
+      applyMinPwm(uFR, vR_sp);
+      applyMinPwm(uRR, vR_sp);
+
+      publishWheelCmd4(clampPctToInt16(uFL), clampPctToInt16(uFR),
+                       clampPctToInt16(uRL), clampPctToInt16(uRR));
     }
 
-    publishWheelCmd4(clampPctToInt16(u[FL]), clampPctToInt16(u[FR]),
-                     clampPctToInt16(u[RL]), clampPctToInt16(u[RR]));
-    publishWheelCmdLR(clampPctToInt16(0.5 * (u[FL] + u[RL])),
-                      clampPctToInt16(0.5 * (u[FR] + u[RR])));
+    publishWheelCmdLR(clampPctToInt16(uL), clampPctToInt16(uR));
 
     if (debug_) {
       RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 500,
-        "SP L=%.3f R=%.3f | "
-        "FL v=%.3f u=%.1f e=%.3f i=%.1f | FR v=%.3f u=%.1f e=%.3f i=%.1f | "
-        "RL v=%.3f u=%.1f e=%.3f i=%.1f | RR v=%.3f u=%.1f e=%.3f i=%.1f",
+        "SP L=%.3f R=%.3f | MEAS L=%.3f R=%.3f | "
+        "uL=%.1f eL=%.3f iL=%.1f | uR=%.1f eR=%.3f iR=%.1f | "
+        "wheels FL v=%.3f FR v=%.3f RL v=%.3f RR v=%.3f",
         vL_sp, vR_sp,
-        v_meas_[FL], u[FL], e[FL], i_[FL],
-        v_meas_[FR], u[FR], e[FR], i_[FR],
-        v_meas_[RL], u[RL], e[RL], i_[RL],
-        v_meas_[RR], u[RR], e[RR], i_[RR]);
+        vL_meas, vR_meas,
+        uL, eL, iL_,
+        uR, eR, iR_,
+        v_meas_[FL], v_meas_[FR], v_meas_[RL], v_meas_[RR]);
     }
   }
 
@@ -412,6 +458,10 @@ private:
   double i_max_{ 40.0};
 
   double meas_lpf_alpha_{0.2};
+
+  bool use_within_side_sync_{false};
+  double sync_k_{15.0};
+
   bool debug_{true};
 
   // -------------------------
@@ -439,8 +489,9 @@ private:
   double v_meas_[4]{0.0,0.0,0.0,0.0};
   rclcpp::Time meas_time_{0,0,RCL_ROS_TIME};
 
-  // PI integrators per wheel
-  double i_[4]{0.0,0.0,0.0,0.0};
+  // SIDE PI integrators (skid-steer)
+  double iL_{0.0};
+  double iR_{0.0};
 
   // odom state
   double x_{0.0}, y_{0.0}, th_{0.0};
