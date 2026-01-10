@@ -1,37 +1,27 @@
-#ifndef BASE_KINEMATICS_CALCULATOR_H
-#define BASE_KINEMATICS_CALCULATOR_H
-
+#pragma once
 namespace base {
 
 struct WheelSpeedSet {
-    double fl;
-    double fr;
-    double rl;
-    double rr;
+  double left{0.0};
+  double right{0.0};
 };
 
 struct RobotTwist {
-    double linear_x;
-    double linear_y;
-    double angular_z;
+  double linear_x{0.0};
+  double linear_y{0.0};
+  double angular_z{0.0};
 };
 
 class KinematicsCalculator {
 public:
-    // Assumes 4-wheel skid steer/diff drive approximation
-    KinematicsCalculator(double wheel_separation, double wheel_radius);
+  KinematicsCalculator(double wheel_sep_m, double wheel_radius_m);
 
-    // Inverse Kinematics: Twist -> Wheel Speeds (rad/s)
-    WheelSpeedSet calculateWheelSpeeds(double linear_x, double angular_z);
-
-    // Forward Kinematics: Wheel Speeds (rad/s) -> Twist
-    RobotTwist calculateRobotTwist(const WheelSpeedSet& speeds);
+  WheelSpeedSet calculateWheelSpeeds(double linear_x_mps, double angular_z_rps) const;
+  RobotTwist calculateRobotTwist(const WheelSpeedSet& speeds_radps) const;
 
 private:
-    double wheel_sep_;
-    double wheel_rad_;
+  double wheel_sep_{0.0};
+  double wheel_rad_{0.0};
 };
 
 } // namespace base
-
-#endif // BASE_KINEMATICS_CALCULATOR_H
