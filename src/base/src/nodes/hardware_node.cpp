@@ -166,3 +166,121 @@ private:
     // Build 4 identical controllers (one per wheel)
     for (int i = 0; i < WHEEL_COUNT; ++i) {
       pid_[i] = std::make_unique<base::PIDController>(
+        kp_, ki_, kd_,
+        output_limit_,
+        deadband_,
+        setpoint_max_accel_
+      );
+    }
+  }
+
+  void onWheelCmd(const base::msg::WheelVelocities::SharedPtr msg)
+  {
+    // 4-wheel diff drive: left applies to FL+RL, right to FR+RR
+    target_w_radps_[FL] = msg->left;
+    target_w_radps_[RL] = msg->left;
+    target_w_radps_[FR] = msg->right;
+    target_w_radps_[RR] = msg->right;
+  }
+
+#ifdef HAVE_PHIDGET22
+  void initEncoders()
+  {
+    const bool inv[WHEEL_COUNT]{invert_fl_, invert_fr_, invert_rl_, invert_rr_};
+
+    for (int i = 0; i < WHEEL_COUNT; ++i) {
+      enc_ctx_[i].ticks_atomic = &ticks_[i];
+      enc_ctx_[i].invert = inv[i];
+
+      PhidgetEncoderHandle h = nullptr;
+      phidget_check(PhidgetEncoder_create(&h), "PhidgetEncoder_create");
+      enc_[i] = h;
+
+      // TODO: set serial/channel if required for your setup
+      // phidget_check(Phidget_setDeviceSerialNumber((PhidgetHandle)h, serial_), "setDeviceSerialNumber");
+      // phidget_check(Phidget_setChannel((PhidgetHandle)h, channel_), "setChannel");
+
+      phidget_check(Phidget_openWaitForAttachment((PhidgetHandle)h, 5000), "openWaitForAttachment");
+
+      phidget_check(
+        PhidgetEncoder_setOnPositionChangeHandler(h, onPositionChange, &enc_ctx_[i]),
+        "setOnPositionChangeHandler"
+      );
+    }
+
+    RCLCPP_INFO(get_logger(), "Encoders initialized (Phidget22).");
+  }
+
+  void shutdownEncoders()
+  {
+    for (int i = 0; i < WHEEL_COUNT; ++i) {
+      if (enc_[i]) {
+        Phidget_close((PhidgetHandle)enc_[i]);
+        PhidgetEncoder_delete(&enc_[i]);
+        enc_[i] = nullptr;
+      }
+    }
+  }
+
+  static void phidget_check(PhidgetReturnCode rc, const char* what)
+  {
+    if (rc != EPHIDGET_OK) {
+      const char* err = nullptr;
+      Phidget_getErrorDescription(rc, &err);
+      throw std::runtime_error(std::string("Phidget error in ") + what + ": " + (err ? err : "unknown"));
+    }
+  }
+#endif
+
+  void controlLoop()
+  {
+    // 1) measured wheel speed from tick delta
+    double meas_w_radps[WHEEL_COUNT]{0.0, 0.0, 0.0, 0.0};
+
+    for (int i = 0; i < WHEEL_COUNT; ++i) {
+      const int64_t t = ticks_[i].load(std::memory_order_relaxed);
+      const int64_t dticks = t - ticks_last_[i];
+      ticks_last_[i] = t;
+
+      const double rev = static_cast<double>(dticks) / ticks_per_rev_;
+      const double rad = rev * 2.0 * M_PI;
+      meas_w_radps[i] = rad / control_dt_;
+    }
+
+    // 2) PID per wheel -> drive
+    for (int i = 0; i < WHEEL_COUNT; ++i) {
+      const double u = pid_[i]->compute(target_w_radps_[i], meas_w_radps[i], control_dt_);
+      writeMotor(i, u);
+    }
+
+    // 3) publish ticks
+    base::msg::WheelTicks4 out;
+    out.header.stamp = now();
+    out.header.frame_id = ticks_frame_id_;
+
+    out.fl_ticks = ticks_[FL].load(std::memory_order_relaxed);
+    out.fr_ticks = ticks_[FR].load(std::memory_order_relaxed);
+    out.rl_ticks = ticks_[RL].load(std::memory_order_relaxed);
+    out.rr_ticks = ticks_[RR].load(std::memory_order_relaxed);
+
+    ticks_pub_->publish(out);
+  }
+
+  void writeMotor(int wheel, double u_norm)
+  {
+    (void)wheel;
+    (void)u_norm;
+
+    // Placeholder: map u_norm (typically in [-output_limit .. +output_limit]) to your driver.
+    // Example:
+    //   driver_.setNormalized(wheel, u_norm);
+  }
+};
+
+int main(int argc, char** argv)
+{
+  rclcpp::init(argc, argv);
+  rclcpp::spin(std::make_shared<HardwareNode>());
+  rclcpp::shutdown();
+  return 0;
+}
