@@ -12,7 +12,14 @@ hardware_node:
     kd: 0.0
     output_limit: 1.0
     deadband: 0.0
-    setpoint_max_accel: 1000000000.0  # praktisch "aus"
+    setpoint_max_accel: 1000000000.0
+
+    # Encoder source like encodertest
+    joint_states_topic: "/joint_states"
+    fl_joint: "joint2"
+    fr_joint: "joint3"
+    rl_joint: "joint0"
+    rr_joint: "joint1"
 
     invert_fl: false
     invert_fr: false
