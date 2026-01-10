@@ -2,41 +2,27 @@
 
 namespace base {
 
-KinematicsCalculator::KinematicsCalculator(double wheel_separation, double wheel_radius)
-    : wheel_sep_(wheel_separation), wheel_rad_(wheel_radius) {}
+KinematicsCalculator::KinematicsCalculator(double wheel_sep_m, double wheel_radius_m)
+: wheel_sep_(wheel_sep_m), wheel_rad_(wheel_radius_m) {}
 
-// inverse kinematic: translates movement commands into the required individual wheel speeds.
-WheelSpeedSet KinematicsCalculator::calculateWheelSpeeds(double linear_x, double angular_z) {    
-    // Differential drive kinematics equation
-    // V_left = V - (omega * width / 2)
-    // V_right = V + (omega * width / 2)
-    // Wheel_RPM = V_wheel / radius
-
-    double vel_left = linear_x - (angular_z * wheel_sep_ / 2.0);
-    double vel_right = linear_x + (angular_z * wheel_sep_ / 2.0);
-
-    //Angular velocity
-    double rad_s_left = vel_left / wheel_rad_;
-    double rad_s_right = vel_right / wheel_rad_;
-
-    // For skid steer, Front and Rear on same side behave identically
-    return {rad_s_left, rad_s_right, rad_s_left, rad_s_right};
+WheelSpeedSet KinematicsCalculator::calculateWheelSpeeds(double linear_x_mps, double angular_z_rps) const {
+  WheelSpeedSet ws;
+  // differential drive inverse kinematics:
+  // v_l = v - w*L/2 ; v_r = v + w*L/2 ; omega = v / r
+  const double v_l = linear_x_mps - angular_z_rps * (wheel_sep_ * 0.5);
+  const double v_r = linear_x_mps + angular_z_rps * (wheel_sep_ * 0.5);
+  ws.left  = v_l / wheel_rad_;
+  ws.right = v_r / wheel_rad_;
+  return ws;
 }
 
-RobotTwist KinematicsCalculator::calculateRobotTwist(const WheelSpeedSet& speeds) {
-    // Average left and right side speeds
-    double rad_s_left = (speeds.fl + speeds.rl) / 2.0;
-    double rad_s_right = (speeds.fr + speeds.rr) / 2.0;
-
-    double vel_left = rad_s_left * wheel_rad_;
-    double vel_right = rad_s_right * wheel_rad_;
-
-    RobotTwist twist;
-    twist.linear_x = (vel_left + vel_right) / 2.0;
-    twist.linear_y = 0.0; // Non-holonomic
-    twist.angular_z = (vel_right - vel_left) / wheel_sep_;
-    
-    return twist;
+RobotTwist KinematicsCalculator::calculateRobotTwist(const WheelSpeedSet& s) const {
+  RobotTwist t;
+  const double v_l = s.left  * wheel_rad_;
+  const double v_r = s.right * wheel_rad_;
+  t.linear_x = 0.5 * (v_l + v_r);
+  t.angular_z = (v_r - v_l) / wheel_sep_;
+  return t;
 }
 
 } // namespace base
