@@ -1,372 +1,306 @@
-#include "base/hardware_node.hpp"
+#include <rclcpp/rclcpp.hpp>
 
-#include <algorithm>
-#include <chrono>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
-#include <stdexcept>
+#include <limits>
+#include <memory>
 #include <string>
 #include <vector>
 
-// Linux I2C
-#include <fcntl.h>
-#include <linux/i2c-dev.h>
-#include <sys/ioctl.h>
-#include <unistd.h>
+#include "base/msg/wheel_velocities.hpp"
+#include "base/msg/wheel_ticks4.hpp"
 
-// Phidget22
-#include <phidget22.h>
+#include "base/pid_controller.h"
 
-using namespace std::chrono_literals;
+#ifdef HAVE_PHIDGET22
+  #include <phidget22.h>
+#endif
 
-// ---------------------------
-// Small helpers
-// ---------------------------
-static int clamp_int(int v, int lo, int hi) { return std::max(lo, std::min(hi, v)); }
+// NOTE: This node is written as a practical hardware-facing controller:
+// - subscribes wheel commands (left/right rad/s)
+// - reads 4 wheel encoders
+// - runs 4 independent PID controllers (FL, FR, RL, RR)
+// - drives 4 motor outputs (abstracted here; adapt to your driver)
 
-static void phidget_check(PhidgetReturnCode rc, const char* what) {
-  if (rc != EPHIDGET_OK) {
-    const char* err = nullptr;
-    Phidget_getErrorDescription(rc, &err);
-    throw std::runtime_error(std::string(what) + " failed: " + (err ? err : "unknown"));
-  }
-}
-
-// ---------------------------
-// I2C low-level wrapper
-// ---------------------------
-class HardwareNode::NxtServoI2C {
+class HardwareNode : public rclcpp::Node
+{
 public:
-  NxtServoI2C(std::string dev, int addr) : dev_(std::move(dev)), addr_(addr) {}
+  HardwareNode()
+  : Node("hardware_node")
+  {
+    declareParams();
+    getParams();
 
-  void open_bus() {
-    fd_ = ::open(dev_.c_str(), O_RDWR);
-    if (fd_ < 0) throw std::runtime_error("open(" + dev_ + ") failed");
-    if (ioctl(fd_, I2C_SLAVE, addr_) < 0) {
-      ::close(fd_);
-      fd_ = -1;
-      throw std::runtime_error("ioctl(I2C_SLAVE) failed");
+    wheel_cmd_sub_ = create_subscription<base::msg::WheelVelocities>(
+      wheel_cmd_topic_, rclcpp::QoS(10),
+      std::bind(&HardwareNode::onWheelCmd, this, std::placeholders::_1));
+
+    ticks_pub_ = create_publisher<base::msg::WheelTicks4>(wheel_ticks_topic_, rclcpp::QoS(10));
+
+#ifdef HAVE_PHIDGET22
+    initEncoders();
+#else
+    RCLCPP_WARN(get_logger(), "Built without Phidget22 support (HAVE_PHIDGET22=0). Encoders will not work.");
+#endif
+
+    // Control loop timer
+    timer_ = create_wall_timer(
+      std::chrono::duration<double>(control_dt_),
+      std::bind(&HardwareNode::controlLoop, this));
+  }
+
+  ~HardwareNode() override
+  {
+#ifdef HAVE_PHIDGET22
+    shutdownEncoders();
+#endif
+  }
+
+private:
+  enum WheelIndex { FL = 0, FR = 1, RL = 2, RR = 3, WHEEL_COUNT = 4 };
+
+  // ---- Parameters ----
+  std::string wheel_cmd_topic_{"/wheel_commands"};
+  std::string wheel_ticks_topic_{"/base/wheel_ticks4"};
+
+  double control_dt_{0.02};                 // s
+  double ticks_per_rev_{2048.0};            // encoder ticks per wheel revolution
+  double max_wheel_radps_{20.0};            // used for normalization (if output mapping uses -1..1)
+
+  // PID gains (same for all wheels here; you can extend to per-wheel gains)
+  double kp_{0.6};
+  double ki_{0.0};
+  double kd_{0.0};
+
+  // Output shaping
+  double output_limit_{1.0};                // normalized [-limit..limit]
+  double deadband_{0.0};                    // normalized
+  double setpoint_max_accel_{std::numeric_limits<double>::infinity()}; // rad/s^2
+
+  // Inversion per wheel
+  bool invert_fl_{false};
+  bool invert_fr_{false};
+  bool invert_rl_{false};
+  bool invert_rr_{false};
+
+  // ---- ROS ----
+  rclcpp::Subscription<base::msg::WheelVelocities>::SharedPtr wheel_cmd_sub_;
+  rclcpp::Publisher<base::msg::WheelTicks4>::SharedPtr ticks_pub_;
+  rclcpp::TimerBase::SharedPtr timer_;
+
+  // ---- Controllers ----
+  base::PidController pid_[WHEEL_COUNT];
+
+  // Target wheel speeds (rad/s)
+  double target_w_radps_[WHEEL_COUNT]{0.0, 0.0, 0.0, 0.0};
+  double target_w_radps_prev_[WHEEL_COUNT]{0.0, 0.0, 0.0, 0.0};
+
+  // Measured wheel speeds (rad/s)
+  double meas_w_radps_[WHEEL_COUNT]{0.0, 0.0, 0.0, 0.0};
+
+  // Encoder tick counters (atomic for callback safety)
+  std::atomic<int64_t> ticks_[WHEEL_COUNT]{0, 0, 0, 0};
+  int64_t ticks_last_[WHEEL_COUNT]{0, 0, 0, 0};
+
+#ifdef HAVE_PHIDGET22
+  // Phidget handles and callback context
+  PhidgetEncoderHandle enc_[WHEEL_COUNT]{nullptr, nullptr, nullptr, nullptr};
+
+  // We pass (ticks_atomic_ptr, invert_bool) as callback context
+  struct EncCbCtx {
+    std::atomic<int64_t>* ticks_atomic{nullptr};
+    bool invert{false};
+  };
+  EncCbCtx enc_ctx_[WHEEL_COUNT];
+
+  // === Jazzy / current phidget22 header expects:
+  // void (*)(_PhidgetEncoder*, void*, int, double, int)
+  static void onPositionChange(
+      PhidgetEncoderHandle,
+      void* ctx,
+      int positionChange,
+      double /*timeChange*/,
+      int /*indexTriggered*/)
+  {
+    auto* c = static_cast<EncCbCtx*>(ctx);
+    if (!c || !c->ticks_atomic) return;
+
+    const int64_t delta = static_cast<int64_t>(positionChange);
+    if (c->invert) c->ticks_atomic->fetch_add(-delta, std::memory_order_relaxed);
+    else          c->ticks_atomic->fetch_add( delta, std::memory_order_relaxed);
+  }
+#endif
+
+  void declareParams()
+  {
+    declare_parameter<std::string>("wheel_cmd_topic", wheel_cmd_topic_);
+    declare_parameter<std::string>("wheel_ticks_topic", wheel_ticks_topic_);
+
+    declare_parameter<double>("control_dt", control_dt_);
+    declare_parameter<double>("ticks_per_rev", ticks_per_rev_);
+    declare_parameter<double>("max_wheel_radps", max_wheel_radps_);
+
+    declare_parameter<double>("kp", kp_);
+    declare_parameter<double>("ki", ki_);
+    declare_parameter<double>("kd", kd_);
+
+    declare_parameter<double>("output_limit", output_limit_);
+    declare_parameter<double>("deadband", deadband_);
+    declare_parameter<double>("setpoint_max_accel", setpoint_max_accel_);
+
+    declare_parameter<bool>("invert_fl", invert_fl_);
+    declare_parameter<bool>("invert_fr", invert_fr_);
+    declare_parameter<bool>("invert_rl", invert_rl_);
+    declare_parameter<bool>("invert_rr", invert_rr_);
+  }
+
+  void getParams()
+  {
+    wheel_cmd_topic_   = get_parameter("wheel_cmd_topic").as_string();
+    wheel_ticks_topic_ = get_parameter("wheel_ticks_topic").as_string();
+
+    control_dt_    = get_parameter("control_dt").as_double();
+    ticks_per_rev_ = get_parameter("ticks_per_rev").as_double();
+    max_wheel_radps_ = get_parameter("max_wheel_radps").as_double();
+
+    kp_ = get_parameter("kp").as_double();
+    ki_ = get_parameter("ki").as_double();
+    kd_ = get_parameter("kd").as_double();
+
+    output_limit_ = get_parameter("output_limit").as_double();
+    deadband_     = get_parameter("deadband").as_double();
+    setpoint_max_accel_ = get_parameter("setpoint_max_accel").as_double();
+
+    invert_fl_ = get_parameter("invert_fl").as_bool();
+    invert_fr_ = get_parameter("invert_fr").as_bool();
+    invert_rl_ = get_parameter("invert_rl").as_bool();
+    invert_rr_ = get_parameter("invert_rr").as_bool();
+
+    for (int i = 0; i < WHEEL_COUNT; ++i) {
+      pid_[i].setGains(kp_, ki_, kd_);
+      pid_[i].setDt(control_dt_);
+      pid_[i].setOutputLimit(output_limit_);
+      pid_[i].setDeadband(deadband_);
     }
   }
 
-  ~NxtServoI2C() {
-    if (fd_ >= 0) ::close(fd_);
-    fd_ = -1;
+  void onWheelCmd(const base::msg::WheelVelocities::SharedPtr msg)
+  {
+    // Left command applies to FL+RL, right command to FR+RR
+    target_w_radps_[FL] = msg->left;
+    target_w_radps_[RL] = msg->left;
+    target_w_radps_[FR] = msg->right;
+    target_w_radps_[RR] = msg->right;
   }
 
-  void write1(uint8_t reg, uint8_t val) {
-    uint8_t buf[2] = {reg, val};
-    if (::write(fd_, buf, 2) != 2) throw std::runtime_error("I2C write1 failed");
+#ifdef HAVE_PHIDGET22
+  void initEncoders()
+  {
+    // Map inversion to wheels
+    const bool inv[WHEEL_COUNT]{invert_fl_, invert_fr_, invert_rl_, invert_rr_};
+
+    for (int i = 0; i < WHEEL_COUNT; ++i) {
+      enc_ctx_[i].ticks_atomic = &ticks_[i];
+      enc_ctx_[i].invert = inv[i];
+
+      PhidgetEncoderHandle h = nullptr;
+      phidget_check(PhidgetEncoder_create(&h), "Encoder_create");
+      enc_[i] = h;
+
+      // TODO: set serial/channel if you use multiple devices
+      // phidget_check(Phidget_setDeviceSerialNumber((PhidgetHandle)h, serial_), "setDeviceSerialNumber");
+      // phidget_check(Phidget_setChannel((PhidgetHandle)h, channel_), "setChannel");
+
+      phidget_check(Phidget_openWaitForAttachment((PhidgetHandle)h, 5000), "openWaitForAttachment");
+
+      // Correct callback signature for current phidget22 headers:
+      phidget_check(
+        PhidgetEncoder_setOnPositionChangeHandler(h, onPositionChange, &enc_ctx_[i]),
+        "setOnPositionChangeHandler"
+      );
+    }
+
+    RCLCPP_INFO(get_logger(), "Encoders initialized (Phidget22).");
   }
 
-  void write2(uint8_t reg, uint8_t lo, uint8_t hi) {
-    uint8_t buf[3] = {reg, lo, hi};
-    if (::write(fd_, buf, 3) != 3) throw std::runtime_error("I2C write2 failed");
+  void shutdownEncoders()
+  {
+    for (int i = 0; i < WHEEL_COUNT; ++i) {
+      if (enc_[i]) {
+        Phidget_close((PhidgetHandle)enc_[i]);
+        PhidgetEncoder_delete(&enc_[i]);
+        enc_[i] = nullptr;
+      }
+    }
   }
 
-private:
-  std::string dev_;
-  int addr_{0};
-  int fd_{-1};
+  static void phidget_check(PhidgetReturnCode rc, const char* what)
+  {
+    if (rc != EPHIDGET_OK) {
+      const char* err = nullptr;
+      Phidget_getErrorDescription(rc, &err);
+      throw std::runtime_error(std::string("Phidget error in ") + what + ": " + (err ? err : "unknown"));
+    }
+  }
+#endif
+
+  void controlLoop()
+  {
+    // 1) compute measured rad/s from tick deltas
+    for (int i = 0; i < WHEEL_COUNT; ++i) {
+      const int64_t t = ticks_[i].load(std::memory_order_relaxed);
+      const int64_t dticks = t - ticks_last_[i];
+      ticks_last_[i] = t;
+
+      // ticks -> rev -> rad
+      const double rev = static_cast<double>(dticks) / ticks_per_rev_;
+      const double rad = rev * 2.0 * M_PI;
+      meas_w_radps_[i] = rad / control_dt_;
+    }
+
+    // 2) apply setpoint accel limit (per wheel)
+    for (int i = 0; i < WHEEL_COUNT; ++i) {
+      double sp = target_w_radps_[i];
+
+      if (std::isfinite(setpoint_max_accel_)) {
+        const double max_step = setpoint_max_accel_ * control_dt_;
+        const double prev = target_w_radps_prev_[i];
+        const double delta = sp - prev;
+        if (delta >  max_step) sp = prev + max_step;
+        if (delta < -max_step) sp = prev - max_step;
+      }
+      target_w_radps_prev_[i] = sp;
+
+      // 3) PID -> normalized command
+      const double u = pid_[i].update(sp, meas_w_radps_[i]);
+
+      // 4) drive motors (replace with your actual driver)
+      writeMotor(i, u);
+    }
+
+    // 5) publish ticks
+    base::msg::WheelTicks4 out;
+    out.fl = ticks_[FL].load(std::memory_order_relaxed);
+    out.fr = ticks_[FR].load(std::memory_order_relaxed);
+    out.rl = ticks_[RL].load(std::memory_order_relaxed);
+    out.rr = ticks_[RR].load(std::memory_order_relaxed);
+    ticks_pub_->publish(out);
+  }
+
+  void writeMotor(int wheel, double u_norm)
+  {
+    (void)wheel;
+    (void)u_norm;
+
+    // Placeholder:
+    // - u_norm expected normalized in [-output_limit..output_limit]
+    // - Map to your driver (PWM %, PWM µs, CAN command, etc.)
+    //
+    // Example (pseudo):
+    //   driver_.setNormalized(wheel, u_norm);
+  }
 };
-
-// ---------------------------
-// NXT-Servo driver (4 channels)
-// ---------------------------
-class HardwareNode::NxtServoDriver {
-public:
-  NxtServoDriver(std::unique_ptr<NxtServoI2C> i2c,
-                 std::array<int,4> servo_channels,
-                 std::array<double,4> k_us_per_pct,
-                 std::array<int,4> neutral_us,
-                 std::array<int,4> min_us,
-                 std::array<int,4> max_us,
-                 int pct_min, int pct_max)
-  : i2c_(std::move(i2c)),
-    ch_(servo_channels),
-    k_(k_us_per_pct),
-    neutral_(neutral_us),
-    min_(min_us),
-    max_(max_us),
-    pct_min_(pct_min),
-    pct_max_(pct_max)
-  {}
-
-  void open() { i2c_->open_bus(); }
-
-  void set_acceleration(int channel, int accel) {
-    // same register scheme as existing code: reg = channel + 82
-    const uint8_t reg = static_cast<uint8_t>(channel + 82);
-    i2c_->write1(reg, static_cast<uint8_t>(clamp_int(accel, 0, 255)));
-  }
-
-  void set_acceleration_all(int accel) {
-    accel = clamp_int(accel, 0, 255);
-    for (int ch = 0; ch < 4; ++ch) set_acceleration(ch, accel);
-  }
-
-  void set_pulse_us(int channel, int pulse_us) {
-    pulse_us = clamp_int(pulse_us, 500, 2500);
-    // register scheme: channel*2
-    const uint8_t reg = static_cast<uint8_t>(channel * 2);
-    const uint8_t lo = static_cast<uint8_t>(pulse_us & 0xFF);
-    const uint8_t hi = static_cast<uint8_t>((pulse_us >> 8) & 0xFF);
-    i2c_->write2(reg, lo, hi);
-  }
-
-  void stop_all() {
-    for (int w = 0; w < 4; ++w) set_pct(static_cast<size_t>(w), 0);
-  }
-
-  void set_pct(size_t wheel_idx, int pct) {
-    pct = clamp_int(pct, pct_min_, pct_max_);
-    const int pulse = clamp_int(static_cast<int>(std::lround(neutral_[wheel_idx] + k_[wheel_idx] * pct)),
-                                min_[wheel_idx], max_[wheel_idx]);
-    set_pulse_us(ch_[wheel_idx], pulse);
-  }
-
-  void set_all(int fl, int fr, int rl, int rr) {
-    set_pct(0, fl); set_pct(1, fr); set_pct(2, rl); set_pct(3, rr);
-  }
-
-private:
-  std::unique_ptr<NxtServoI2C> i2c_;
-  std::array<int,4> ch_;
-  std::array<double,4> k_;
-  std::array<int,4> neutral_, min_, max_;
-  int pct_min_{-100}, pct_max_{100};
-};
-
-// ---------------------------
-// Encoder callback
-// ---------------------------
-static void onPositionChange(PhidgetEncoderHandle, void* ctx, int, int64_t positionChange, double) {
-  auto* p = static_cast<std::pair<std::atomic<int64_t>*, bool>*>(ctx);
-  if (!p) return;
-  int64_t delta = positionChange;
-  if (p->second) delta = -delta;
-  p->first->fetch_add(delta, std::memory_order_relaxed);
-}
-
-// ---------------------------
-// HardwareNode
-// ---------------------------
-HardwareNode::HardwareNode()
-: Node("hardware_node")
-{
-  // Topics
-  wheel_cmd_topic_   = declare_parameter<std::string>("wheel_cmd_topic", "/wheel_commands");
-  wheel_ticks_topic_ = declare_parameter<std::string>("wheel_ticks_topic", "/base/wheel_ticks4");
-  ticks_frame_id_    = declare_parameter<std::string>("ticks_frame_id", "base_link");
-
-  // Encoder params
-  phidget_serial_ = declare_parameter<int>("phidget_serial", -1);
-  {
-    auto v = declare_parameter<std::vector<int>>("encoder_channels", {2,3,0,1});
-    for (size_t i=0;i<4 && i<v.size();++i) encoder_channels_[i]=v[i];
-  }
-  invert_[FL] = declare_parameter<bool>("invert_fl", true);
-  invert_[FR] = declare_parameter<bool>("invert_fr", false);
-  invert_[RL] = declare_parameter<bool>("invert_rl", true);
-  invert_[RR] = declare_parameter<bool>("invert_rr", false);
-
-  ticks_per_rev_ = declare_parameter<int64_t>("ticks_per_rev", 131000);
-
-  // Motor controller params
-  i2c_dev_  = declare_parameter<std::string>("i2c_dev", "/dev/i2c-1");
-  i2c_addr_ = declare_parameter<int>("i2c_addr", 0x58);
-
-  {
-    auto v = declare_parameter<std::vector<int>>("servo_channels", {0,1,2,3});
-    for (size_t i=0;i<4 && i<v.size();++i) servo_channels_[i]=v[i];
-  }
-
-  {
-    auto v = declare_parameter<std::vector<double>>("k_us_per_pct_4", {5.5,5.5,5.5,5.5});
-    for (size_t i=0;i<4 && i<v.size();++i) k_us_per_pct_[i]=v[i];
-  }
-  {
-    auto v = declare_parameter<std::vector<int>>("neutral_us_4", {1480,1480,1480,1480});
-    for (size_t i=0;i<4 && i<v.size();++i) neutral_us_[i]=v[i];
-  }
-  {
-    auto v = declare_parameter<std::vector<int>>("min_us_4", {900,900,900,900});
-    for (size_t i=0;i<4 && i<v.size();++i) min_us_[i]=v[i];
-  }
-  {
-    auto v = declare_parameter<std::vector<int>>("max_us_4", {2100,2100,2100,2100});
-    for (size_t i=0;i<4 && i<v.size();++i) max_us_[i]=v[i];
-  }
-
-  pct_min_ = declare_parameter<int>("pct_min", -100);
-  pct_max_ = declare_parameter<int>("pct_max", 100);
-  accel_   = declare_parameter<int>("accel", 100);
-
-  // Control params
-  max_wheel_radps_      = declare_parameter<double>("max_wheel_radps", 20.0);
-  watchdog_timeout_s_   = declare_parameter<double>("watchdog_timeout_s", 0.3);
-  control_period_ms_    = declare_parameter<int>("control_period_ms", 10);
-  publish_ticks_ms_     = declare_parameter<int>("publish_ticks_ms", 20);
-
-  // PID params (Floribot1.0 style, per-wheel optional)
-  const double kp = declare_parameter<double>("kp", 2.0);
-  const double ki = declare_parameter<double>("ki", 0.5);
-  const double kd = declare_parameter<double>("kd", 0.0);
-  const double out_lim = declare_parameter<double>("output_limit", 1.0);
-  const double deadband = declare_parameter<double>("deadband", 0.05);
-  const double max_accel = declare_parameter<double>("setpoint_max_accel", 2.0);
-
-  for (size_t i=0;i<4;++i) {
-    pid_[i] = std::make_unique<base::PIDController>(kp,ki,kd,out_lim,deadband,max_accel);
-    ticks_[i].store(0, std::memory_order_relaxed);
-  }
-
-  // ROS
-  sub_ = create_subscription<base::msg::WheelVelocities>(
-    wheel_cmd_topic_, 10,
-    std::bind(&HardwareNode::onWheelCmd, this, std::placeholders::_1));
-
-  pub_ticks_ = create_publisher<base::msg::WheelTicks4>(wheel_ticks_topic_, 10);
-
-  // Init I2C driver
-  i2c_ = std::make_unique<NxtServoI2C>(i2c_dev_, i2c_addr_);
-  driver_ = std::make_unique<NxtServoDriver>(std::move(i2c_), servo_channels_, k_us_per_pct_, neutral_us_, min_us_, max_us_, pct_min_, pct_max_);
-  driver_->open();
-  driver_->set_acceleration_all(accel_);
-  driver_->stop_all();
-  stopped_ = true;
-
-  // Encoders
-  initEncoders();
-
-  last_cmd_time_ = now();
-  last_control_time_ = now();
-
-  timer_watchdog_ = create_wall_timer(50ms, std::bind(&HardwareNode::watchdog, this));
-  timer_control_  = create_wall_timer(std::chrono::milliseconds(std::max(1, control_period_ms_)),
-                                      std::bind(&HardwareNode::controlLoop, this));
-  timer_ticks_    = create_wall_timer(std::chrono::milliseconds(std::max(1, publish_ticks_ms_)),
-                                      std::bind(&HardwareNode::publishTicks, this));
-
-  RCLCPP_INFO(get_logger(),
-    "hardware_node started | cmd=%s | ticks=%s | i2c=%s addr=0x%02x | ticks_per_rev=%ld | max_wheel_radps=%.2f",
-    wheel_cmd_topic_.c_str(), wheel_ticks_topic_.c_str(), i2c_dev_.c_str(), i2c_addr_,
-    static_cast<long>(ticks_per_rev_), max_wheel_radps_);
-}
-
-HardwareNode::~HardwareNode() {
-  try {
-    if (driver_) driver_->stop_all();
-  } catch (...) {}
-  closeEncoders();
-}
-
-void HardwareNode::onWheelCmd(const base::msg::WheelVelocities::SharedPtr msg) {
-  std::lock_guard<std::mutex> lk(mtx_);
-  // 4-wheel diff drive: left command applies to FL & RL; right to FR & RR
-  target_w_radps_[FL] = msg->left;
-  target_w_radps_[RL] = msg->left;
-  target_w_radps_[FR] = msg->right;
-  target_w_radps_[RR] = msg->right;
-  last_cmd_time_ = now();
-}
-
-void HardwareNode::watchdog() {
-  const auto t = now();
-  if ((t - last_cmd_time_).seconds() > watchdog_timeout_s_) {
-    std::lock_guard<std::mutex> lk(mtx_);
-    for (auto& p : pid_) p->reset();
-    target_w_radps_ = {0,0,0,0};
-  }
-}
-
-void HardwareNode::controlLoop() {
-  const auto t = now();
-  const double dt = (t - last_control_time_).seconds();
-  if (dt <= 0.0) return;
-  last_control_time_ = t;
-
-  // read ticks and compute wheel angular velocities
-  const double ticks_to_rad = 2.0 * M_PI / static_cast<double>(ticks_per_rev_);
-
-  std::array<double,4> w_meas{0,0,0,0};
-  std::array<int64_t,4> ticks_now;
-  for (size_t i=0;i<4;++i) {
-    ticks_now[i] = ticks_[i].load(std::memory_order_relaxed);
-    const int64_t d = ticks_now[i] - last_ticks_[i];
-    last_ticks_[i] = ticks_now[i];
-    w_meas[i] = (static_cast<double>(d) * ticks_to_rad) / dt;
-  }
-
-  // copy targets
-  std::array<double,4> w_sp;
-  {
-    std::lock_guard<std::mutex> lk(mtx_);
-    w_sp = target_w_radps_;
-  }
-
-  // normalize and compute control output u in [-1,1]
-  auto clamp01 = [](double v){ return std::max(-1.0, std::min(1.0, v)); };
-  std::array<int,4> pct{0,0,0,0};
-
-  for (size_t i=0;i<4;++i) {
-    const double sp_n = clamp01(w_sp[i] / max_wheel_radps_);
-    const double ms_n = clamp01(w_meas[i] / max_wheel_radps_);
-    const double u = pid_[i]->compute(sp_n, ms_n, dt); // already includes deadband + saturation
-    pct[i] = static_cast<int>(std::lround(100.0 * clamp01(u)));
-  }
-
-  // apply
-  driver_->set_all(pct[FL], pct[FR], pct[RL], pct[RR]);
-  stopped_ = (pct[FL]==0 && pct[FR]==0 && pct[RL]==0 && pct[RR]==0);
-}
-
-void HardwareNode::publishTicks() {
-  base::msg::WheelTicks4 m;
-  m.header.stamp = now();
-  m.header.frame_id = ticks_frame_id_;
-  m.fl_ticks = ticks_[FL].load(std::memory_order_relaxed);
-  m.fr_ticks = ticks_[FR].load(std::memory_order_relaxed);
-  m.rl_ticks = ticks_[RL].load(std::memory_order_relaxed);
-  m.rr_ticks = ticks_[RR].load(std::memory_order_relaxed);
-  pub_ticks_->publish(m);
-}
-
-void HardwareNode::initEncoders() {
-  // create a small ctx objects to pass invert + atomic ptr into callback
-  static std::array<std::pair<std::atomic<int64_t>*, bool>,4> ctx;
-
-  for (size_t i=0;i<4;++i) {
-    PhidgetEncoderHandle h=nullptr;
-    phidget_check(PhidgetEncoder_create(&h), "PhidgetEncoder_create");
-    phidget_check(Phidget_setDeviceSerialNumber((PhidgetHandle)h, phidget_serial_), "Phidget_setDeviceSerialNumber");
-    phidget_check(Phidget_setChannel((PhidgetHandle)h, encoder_channels_[i]), "Phidget_setChannel");
-    phidget_check(Phidget_setHubPort((PhidgetHandle)h, 0), "Phidget_setHubPort");
-
-    ctx[i] = { &ticks_[i], invert_[i] };
-    phidget_check(PhidgetEncoder_setOnPositionChangeHandler(h, onPositionChange, &ctx[i]),
-                  "PhidgetEncoder_setOnPositionChangeHandler");
-
-    phidget_check(Phidget_openWaitForAttachment((PhidgetHandle)h, 5000), "Phidget_openWaitForAttachment");
-    enc_[i] = (void*)h;
-    ticks_[i].store(0, std::memory_order_relaxed);
-
-    RCLCPP_INFO(get_logger(), "Encoder[%zu] attached | channel=%d invert=%d", i, encoder_channels_[i], (int)invert_[i]);
-  }
-}
-
-void HardwareNode::closeEncoders() {
-  for (size_t i=0;i<4;++i) {
-    if (!enc_[i]) continue;
-    auto h = (PhidgetEncoderHandle)enc_[i];
-    try {
-      Phidget_close((PhidgetHandle)h);
-      PhidgetEncoder_delete(&h);
-    } catch (...) {}
-    enc_[i]=nullptr;
-  }
-}
-
 
 int main(int argc, char** argv)
 {
