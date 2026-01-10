@@ -16,13 +16,11 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 
+#include "sensor_msgs/msg/joint_state.hpp"
+
 #include "base/msg/wheel_velocities.hpp"
 #include "base/msg/wheel_ticks4.hpp"
 #include "base/pid_controller.h"
-
-#ifdef HAVE_PHIDGET22
-  #include <phidget22.h>
-#endif
 
 // ============================================================
 // NXT Servo Controller I2C writer (as in FloriBot Pi code)
@@ -73,6 +71,24 @@ private:
   int fd_{-1};
 };
 
+static bool getJointPosition(const sensor_msgs::msg::JointState& js, const std::string& name, double& pos_out)
+{
+  auto it = std::find(js.name.begin(), js.name.end(), name);
+  if (it == js.name.end()) return false;
+
+  const size_t idx = static_cast<size_t>(std::distance(js.name.begin(), it));
+  if (idx >= js.position.size()) return false;
+
+  pos_out = js.position[idx];
+  return true;
+}
+
+static int64_t toTicks(double pos, bool invert)
+{
+  const int64_t t = static_cast<int64_t>(std::llround(pos));  // encodertest: position already "ticks"
+  return invert ? -t : t;
+}
+
 class HardwareNode : public rclcpp::Node
 {
 public:
@@ -82,33 +98,32 @@ public:
     declareParams();
     getParams();
 
-    // Open I2C motor controller (NXT Servo Controller)
+    // Open I2C motor controller
     nxt_.openBus(i2c_dev_, i2c_addr_);
 
     wheel_cmd_sub_ = create_subscription<base::msg::WheelVelocities>(
       wheel_cmd_topic_, rclcpp::QoS(10),
       std::bind(&HardwareNode::onWheelCmd, this, std::placeholders::_1));
 
-    ticks_pub_ = create_publisher<base::msg::WheelTicks4>(wheel_ticks_topic_, rclcpp::QoS(10));
+    // Encoder source like in encodertest: /joint_states
+    joint_states_sub_ = create_subscription<sensor_msgs::msg::JointState>(
+      joint_states_topic_, rclcpp::QoS(10),
+      std::bind(&HardwareNode::jointStatesCallback, this, std::placeholders::_1));
 
-#ifdef HAVE_PHIDGET22
-    initEncoders();
-#else
-    RCLCPP_WARN(get_logger(),
-      "Built without Phidget22 support (HAVE_PHIDGET22=0). Encoders will not update.");
-#endif
+    ticks_pub_ = create_publisher<base::msg::WheelTicks4>(wheel_ticks_topic_, rclcpp::QoS(10));
 
     timer_ = create_wall_timer(
       std::chrono::duration<double>(control_dt_),
       std::bind(&HardwareNode::controlLoop, this));
+
+    RCLCPP_INFO(get_logger(),
+      "hardware_node: using joint_states topic=%s, joints FL=%s FR=%s RL=%s RR=%s",
+      joint_states_topic_.c_str(),
+      fl_joint_.c_str(), fr_joint_.c_str(), rl_joint_.c_str(), rr_joint_.c_str());
   }
 
   ~HardwareNode() override
   {
-#ifdef HAVE_PHIDGET22
-    shutdownEncoders();
-#endif
-    // ensure bus is closed
     nxt_.closeBus();
   }
 
@@ -120,7 +135,7 @@ private:
   std::string wheel_ticks_topic_{"/base/wheel_ticks4"};
   std::string ticks_frame_id_{"base_link"};
 
-  // Control timing
+  // Control timing + conversion
   double control_dt_{0.02};        // [s]
   double ticks_per_rev_{2048.0};   // [ticks / wheel rev]
 
@@ -128,15 +143,24 @@ private:
   double kp_{0.6};
   double ki_{0.0};
   double kd_{0.0};
-  double output_limit_{1.0};       // PID output clamp (normalized)
+  double output_limit_{1.0};
   double deadband_{0.0};
   double setpoint_max_accel_{std::numeric_limits<double>::infinity()}; // [rad/s^2]
 
-  // Encoder direction invert (per wheel)
+  // ---- Encoder source like encodertest: /joint_states mapping ----
+  std::string joint_states_topic_{"/joint_states"};
+  std::string fl_joint_{"joint2"};
+  std::string fr_joint_{"joint3"};
+  std::string rl_joint_{"joint0"};
+  std::string rr_joint_{"joint1"};
+
   bool invert_fl_{false};
   bool invert_fr_{false};
   bool invert_rl_{false};
   bool invert_rr_{false};
+
+  rclcpp::Time last_joint_stamp_;
+  bool have_joint_state_{false};
 
   // ---- Motor mapping params (Pi style) ----
   std::string i2c_dev_{"/dev/i2c-1"};
@@ -155,6 +179,7 @@ private:
 
   // ---- ROS ----
   rclcpp::Subscription<base::msg::WheelVelocities>::SharedPtr wheel_cmd_sub_;
+  rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_states_sub_;
   rclcpp::Publisher<base::msg::WheelTicks4>::SharedPtr ticks_pub_;
   rclcpp::TimerBase::SharedPtr timer_;
 
@@ -164,38 +189,12 @@ private:
   // Targets (rad/s)
   double target_w_radps_[WHEEL_COUNT]{0.0, 0.0, 0.0, 0.0};
 
-  // Encoder tick accumulation
+  // Encoder ticks (absolute), updated from joint_states
   std::atomic<int64_t> ticks_[WHEEL_COUNT]{0, 0, 0, 0};
   int64_t ticks_last_[WHEEL_COUNT]{0, 0, 0, 0};
 
   // Motor driver
   NxtServoI2C nxt_;
-
-#ifdef HAVE_PHIDGET22
-  PhidgetEncoderHandle enc_[WHEEL_COUNT]{nullptr, nullptr, nullptr, nullptr};
-
-  struct EncCbCtx {
-    std::atomic<int64_t>* ticks_atomic{nullptr};
-    bool invert{false};
-  };
-  EncCbCtx enc_ctx_[WHEEL_COUNT];
-
-  // phidget22 expects: (EncoderHandle, ctx, positionChange(int), timeChange(double), indexTriggered(int))
-  static void onPositionChange(
-      PhidgetEncoderHandle,
-      void* ctx,
-      int positionChange,
-      double /*timeChange*/,
-      int /*indexTriggered*/)
-  {
-    auto* c = static_cast<EncCbCtx*>(ctx);
-    if (!c || !c->ticks_atomic) return;
-
-    const int64_t delta = static_cast<int64_t>(positionChange);
-    if (c->invert) c->ticks_atomic->fetch_add(-delta, std::memory_order_relaxed);
-    else          c->ticks_atomic->fetch_add( delta, std::memory_order_relaxed);
-  }
-#endif
 
   void declareParams()
   {
@@ -216,7 +215,13 @@ private:
     declare_parameter<double>("deadband", deadband_);
     declare_parameter<double>("setpoint_max_accel", setpoint_max_accel_);
 
-    // Encoder invert
+    // joint_states mapping (encodertest style)
+    declare_parameter<std::string>("joint_states_topic", joint_states_topic_);
+    declare_parameter<std::string>("fl_joint", fl_joint_);
+    declare_parameter<std::string>("fr_joint", fr_joint_);
+    declare_parameter<std::string>("rl_joint", rl_joint_);
+    declare_parameter<std::string>("rr_joint", rr_joint_);
+
     declare_parameter<bool>("invert_fl", invert_fl_);
     declare_parameter<bool>("invert_fr", invert_fr_);
     declare_parameter<bool>("invert_rl", invert_rl_);
@@ -260,6 +265,12 @@ private:
     deadband_     = get_parameter("deadband").as_double();
     setpoint_max_accel_ = get_parameter("setpoint_max_accel").as_double();
 
+    joint_states_topic_ = get_parameter("joint_states_topic").as_string();
+    fl_joint_ = get_parameter("fl_joint").as_string();
+    fr_joint_ = get_parameter("fr_joint").as_string();
+    rl_joint_ = get_parameter("rl_joint").as_string();
+    rr_joint_ = get_parameter("rr_joint").as_string();
+
     invert_fl_ = get_parameter("invert_fl").as_bool();
     invert_fr_ = get_parameter("invert_fr").as_bool();
     invert_rl_ = get_parameter("invert_rl").as_bool();
@@ -291,7 +302,6 @@ private:
     pct_min_      = get_parameter("pct_min").as_int();
     pct_max_      = get_parameter("pct_max").as_int();
 
-    // Init controllers (one per wheel)
     for (int i = 0; i < WHEEL_COUNT; ++i) {
       pid_[i] = std::make_unique<base::PIDController>(
         kp_, ki_, kd_,
@@ -304,65 +314,51 @@ private:
 
   void onWheelCmd(const base::msg::WheelVelocities::SharedPtr msg)
   {
-    // 4-wheel diff-drive: left -> FL+RL, right -> FR+RR
     target_w_radps_[FL] = msg->left;
     target_w_radps_[RL] = msg->left;
     target_w_radps_[FR] = msg->right;
     target_w_radps_[RR] = msg->right;
   }
 
-#ifdef HAVE_PHIDGET22
-  void initEncoders()
+  void jointStatesCallback(const sensor_msgs::msg::JointState::SharedPtr msg)
   {
-    const bool inv[WHEEL_COUNT]{invert_fl_, invert_fr_, invert_rl_, invert_rr_};
+    double pfl, pfr, prl, prr;
+    const bool ok_fl = getJointPosition(*msg, fl_joint_, pfl);
+    const bool ok_fr = getJointPosition(*msg, fr_joint_, pfr);
+    const bool ok_rl = getJointPosition(*msg, rl_joint_, prl);
+    const bool ok_rr = getJointPosition(*msg, rr_joint_, prr);
 
-    for (int i = 0; i < WHEEL_COUNT; ++i) {
-      enc_ctx_[i].ticks_atomic = &ticks_[i];
-      enc_ctx_[i].invert = inv[i];
-
-      PhidgetEncoderHandle h = nullptr;
-      phidget_check(PhidgetEncoder_create(&h), "PhidgetEncoder_create");
-      enc_[i] = h;
-
-      // If you need serial/channel configuration, set here.
-      // phidget_check(Phidget_setDeviceSerialNumber((PhidgetHandle)h, serial_), "setDeviceSerialNumber");
-      // phidget_check(Phidget_setChannel((PhidgetHandle)h, channel_), "setChannel");
-
-      phidget_check(Phidget_openWaitForAttachment((PhidgetHandle)h, 5000), "openWaitForAttachment");
-
-      phidget_check(
-        PhidgetEncoder_setOnPositionChangeHandler(h, onPositionChange, &enc_ctx_[i]),
-        "setOnPositionChangeHandler"
+    if (!(ok_fl && ok_fr && ok_rl && ok_rr)) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 2000,
+        "joint_states missing mapping: FL(%s)=%d FR(%s)=%d RL(%s)=%d RR(%s)=%d",
+        fl_joint_.c_str(), (int)ok_fl,
+        fr_joint_.c_str(), (int)ok_fr,
+        rl_joint_.c_str(), (int)ok_rl,
+        rr_joint_.c_str(), (int)ok_rr
       );
+      return;
     }
 
-    RCLCPP_INFO(get_logger(), "Encoders initialized (Phidget22).");
-  }
+    ticks_[FL].store(toTicks(pfl, invert_fl_), std::memory_order_relaxed);
+    ticks_[FR].store(toTicks(pfr, invert_fr_), std::memory_order_relaxed);
+    ticks_[RL].store(toTicks(prl, invert_rl_), std::memory_order_relaxed);
+    ticks_[RR].store(toTicks(prr, invert_rr_), std::memory_order_relaxed);
 
-  void shutdownEncoders()
-  {
-    for (int i = 0; i < WHEEL_COUNT; ++i) {
-      if (enc_[i]) {
-        Phidget_close((PhidgetHandle)enc_[i]);
-        PhidgetEncoder_delete(&enc_[i]);
-        enc_[i] = nullptr;
-      }
-    }
+    rclcpp::Time stamp(msg->header.stamp);
+    last_joint_stamp_ = (stamp.nanoseconds() != 0) ? stamp : now();
+    have_joint_state_ = true;
   }
-
-  static void phidget_check(PhidgetReturnCode rc, const char* what)
-  {
-    if (rc != EPHIDGET_OK) {
-      const char* err = nullptr;
-      Phidget_getErrorDescription(rc, &err);
-      throw std::runtime_error(std::string("Phidget error in ") + what + ": " + (err ? err : "unknown"));
-    }
-  }
-#endif
 
   void controlLoop()
   {
-    // 1) measured wheel speed from tick delta
+    // Without joint_states we can't compute speed -> keep motors neutral
+    if (!have_joint_state_) {
+      for (int i = 0; i < WHEEL_COUNT; ++i) writeMotor(i, 0.0);
+      return;
+    }
+
+    // measured wheel speed from tick delta
     double meas_w_radps[WHEEL_COUNT]{0.0, 0.0, 0.0, 0.0};
 
     for (int i = 0; i < WHEEL_COUNT; ++i) {
@@ -375,15 +371,13 @@ private:
       meas_w_radps[i] = rad / control_dt_;
     }
 
-    // 2) PID per wheel -> motor output
     for (int i = 0; i < WHEEL_COUNT; ++i) {
       const double u = pid_[i]->compute(target_w_radps_[i], meas_w_radps[i], control_dt_);
       writeMotor(i, u);
     }
 
-    // 3) publish ticks
     base::msg::WheelTicks4 out;
-    out.header.stamp = now();
+    out.header.stamp = last_joint_stamp_;
     out.header.frame_id = ticks_frame_id_;
     out.fl_ticks = ticks_[FL].load(std::memory_order_relaxed);
     out.fr_ticks = ticks_[FR].load(std::memory_order_relaxed);
@@ -394,21 +388,16 @@ private:
 
   void writeMotor(int wheel, double u_norm)
   {
-    // PID output is normalized and already limited by PIDController to +/- output_limit_
-    // Apply optional per-wheel gain (can also be -1.0 for polarity flip).
     const double u = std::clamp(u_norm * wheel_gains_[wheel], -output_limit_, output_limit_);
 
-    // normalize to [-100..100] percent
     int pct = static_cast<int>(std::lround((u / output_limit_) * 100.0));
     pct = std::clamp(pct, pct_min_, pct_max_);
 
-    // percent -> pulse (Pi mapping)
     int pulse = static_cast<int>(std::lround(
       static_cast<double>(neutral_us_) + (static_cast<double>(pct) * k_us_per_pct_)
     ));
     pulse = std::clamp(pulse, min_us_, max_us_);
 
-    // send to NXT servo channel
     const int channel = wheel_channels_[wheel];
     nxt_.writePulseUs(channel, pulse);
   }
