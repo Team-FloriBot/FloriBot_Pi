@@ -1,68 +1,43 @@
 hardware_node:
   ros__parameters:
-    # =========================
-    # ROS topics
-    # =========================
-    wheel_cmd_topic: /base/wheel_cmd
-    wheel_cmd4_topic: /base/wheel_cmd4
+    # topics
+    wheel_cmd_topic: /wheel_commands
     wheel_ticks_topic: /base/wheel_ticks4
     ticks_frame_id: base_link
-    prefer_cmd4: true
 
-    # =========================
-    # I2C / Motorcontroller
-    # =========================
-    i2c_dev: "/dev/i2c-1"
-    i2c_addr: 0x58
-
-    # Servo-Kanalzuordnung
-    left_channels:  [2, 0]
-    right_channels: [3, 1]
-    wheel_channels: [2, 3, 0, 1]   # [fl, fr, rl, rr]
-
-    # =========================
-    # Wheel-Gains (werden ignoriert)
-    # =========================
-    wheel_gains: [1.012, 1.309, 1.231, 1.764]
-    ignore_wheel_gains: true
-
-    # =========================
-    # PWM global (Fallback)
-    # =========================
-    k_us_per_pct: 5.5
-    neutral_us: 1480
-    min_us: 900
-    max_us: 2100
-    pct_min: -100
-    pct_max: 100
-
-    # =========================
-    # PWM pro Rad (entscheidend!)
-    # =========================
-    # Reihenfolge: [fl, fr, rl, rr]
-    k_us_per_pct_4: [5.5, 5.5, 5.5, 5.5]
-    neutral_us_4:   [1480, 1480, 1480, 1480]
-    min_us_4:       [900, 900, 900, 900]
-    max_us_4:       [2100, 2100, 2100, 2100]
-
-    # Totband pro Rad (in Prozent)
-    deadband_pct_4: [0, 0, 0, 0]
-
-    # =========================
-    # Safety
-    # =========================
-    acceleration: 0
-    watchdog_timeout_ms: 300
-
-    # =========================
-    # Encoder (Phidget)
-    # =========================
+    # encoders (Phidget)
     phidget_serial: -1
     encoder_channels: [2, 3, 0, 1]   # [fl, fr, rl, rr]
-
     invert_fl: true
     invert_fr: false
     invert_rl: true
     invert_rr: false
+    ticks_per_rev: 131000
 
+    # motor controller (NXT Servo over I2C)
+    i2c_dev: "/dev/i2c-1"
+    i2c_addr: 0x58
+    servo_channels: [0, 1, 2, 3]     # [fl, fr, rl, rr]
+
+    # per-wheel PWM calibration
+    k_us_per_pct_4: [5.5, 5.5, 5.5, 5.5]
+    neutral_us_4:   [1480, 1480, 1480, 1480]
+    min_us_4:       [900, 900, 900, 900]
+    max_us_4:       [2100, 2100, 2100, 2100]
+    pct_min: -100
+    pct_max: 100
+    accel: 100
+
+    # control
+    max_wheel_radps: 20.0
+    watchdog_timeout_s: 0.3
+    control_period_ms: 10
     publish_ticks_ms: 20
+
+    # PID (Floribot1.0 style) - applied per wheel
+    kp: 2.0
+    ki: 0.5
+    kd: 0.0
+    output_limit: 1.0
+    deadband: 0.05
+    setpoint_max_accel: 2.0
