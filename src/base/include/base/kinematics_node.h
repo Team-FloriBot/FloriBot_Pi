@@ -1,45 +1,30 @@
-#ifndef BASE_KINEMATICS_NODE_H
-#define BASE_KINEMATICS_NODE_H
+#pragma once
+#include <memory>
+#include <string>
 
 #include "rclcpp/rclcpp.hpp"
 #include "geometry_msgs/msg/twist.hpp"
-#include "nav_msgs/msg/odometry.hpp"
-#include "tf2_ros/transform_broadcaster.h"
 #include "base/msg/wheel_velocities.hpp"
 #include "base/kinematics_calculator.h"
 
-namespace base {
-
 class KinematicsNode : public rclcpp::Node {
 public:
-    KinematicsNode();
+  KinematicsNode();
 
 private:
-    // Callbacks
-    void cmdVelCallback(const geometry_msgs::msg::Twist::SharedPtr msg);
-    void wheelStateCallback(const base::msg::WheelVelocities::SharedPtr msg);
+  void cmdCallback(const geometry_msgs::msg::Twist::SharedPtr msg);
 
-    // Helpers
-    void publishOdometry(const RobotTwist& twist, double dt);
+  rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr sub_cmd_;
+  rclcpp::Publisher<base::msg::WheelVelocities>::SharedPtr pub_wheels_;
 
-    // ROS Handles
-    rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr sub_cmd_vel_;
-    rclcpp::Subscription<base::msg::WheelVelocities>::SharedPtr sub_wheel_states_;
-    
-    rclcpp::Publisher<base::msg::WheelVelocities>::SharedPtr pub_wheel_cmd_;
-    rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_odom_;
-    std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+  std::unique_ptr<base::KinematicsCalculator> calc_;
 
-    // Logic
-    std::unique_ptr<KinematicsCalculator> kinematics_;
-    
-    // Odom State
-    double x_ = 0.0;
-    double y_ = 0.0;
-    double theta_ = 0.0;
-    rclcpp::Time last_odom_time_;
+  std::string cmd_topic_;
+  std::string wheel_cmd_topic_;
+
+  double wheel_sep_m_{0.385};
+  double wheel_radius_m_{0.10};
+
+  double v_max_mps_{1.0};
+  double w_max_rps_{2.0};
 };
-
-} // namespace base
-
-#endif // BASE_KINEMATICS_NODE_H
