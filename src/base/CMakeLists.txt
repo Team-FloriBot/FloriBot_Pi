@@ -24,7 +24,9 @@ pkg_check_modules(PHIDGET22 QUIET phidget22)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/WheelVelocities.msg"
   "msg/WheelTicks4.msg"
+  DEPENDENCIES builtin_interfaces std_msgs
 )
+
 
 ament_export_dependencies(rosidl_default_runtime)
 
