@@ -1,22 +1,12 @@
 kinematics_node:
   ros__parameters:
-    use_closed_loop: true
-    use_feedforward: true
+    cmd_vel_topic: /cmd_vel
+    wheel_cmd_topic: /wheel_commands
+
+    # 4-wheel diff-drive geometry (same equations as 2-wheel diff-drive)
+    track_width_m: 0.385
+    wheel_radius_m: 0.10
+
+    # safety limits applied to /cmd_vel
     v_max_mps: 0.4
-
-    wheel_kp: 35.0
-    wheel_ki: 10.0
-    i_min: -40.0
-    i_max: 40.0
-
-    # wenn du die in-air Abweichungen schon kennst:
-    # cmd_gain_4 skaliert die Befehle pro Rad (Kinematics-intern).
-    # Beispiel: hinten schneller -> Gains < 1
-    cmd_gain_4: [1.0, 1.0, 0.855, 0.806]
-
-    # optional: hart begrenzen, wie stark FL/RL bzw FR/RR auseinanderlaufen dürfen
-    max_within_side_diff_pct: 0   # z.B. 20 setzen, wenn du es begrenzen willst
-
-    min_pwm_pct: 12
-    meas_lpf_alpha: 0.10
-    debug: true
+    w_max_rps: 2.0
