@@ -5,38 +5,37 @@ hardware_node:
     ticks_frame_id: "base_link"
 
     control_dt: 0.02
-
-    # Phidget: 500 CPR * 4 * 65.5 = 131000 ticks / wheel rev
     ticks_per_rev: 131000.0
 
-    # PID (Startwerte "anti-ruckeln" für low-speed)
-    kp: 0.08
-    ki: 0.35
+    # PID (ruhig bei low speed)
+    kp: 0.06
+    ki: 0.30
     kd: 0.0
-
     output_limit: 1.0
-
-    # etwas größer, um PWM/Mechanik-Totzone nicht ständig zu "flippen"
-    deadband: 0.12
-
-    # limit setpoint ramp (rad/s^2): zu hoch => ruckeln beim Anfahren
-    setpoint_max_accel: 2.0
-
-    # stop threshold (rad/s)
+    deadband: 0.10
+    setpoint_max_accel: 1.5
     stop_eps_radps: 0.05
 
-    # Messwertfilter (0..1): kleiner => stärker glätten
+    # measurement smoothing
     meas_alpha: 0.25
-    meas_w_eps: 0.05
+    meas_w_eps: 0.03
 
-    # Ausgangsänderung begrenzen (0 disables). kleiner => weicheres Anfahren
-    u_slew_rate: 1.5
+    # KEY: speed estimate over longer window
+    speed_window_s: 0.10
+
+    # output smoothing
+    u_slew_rate: 1.0
+
+    # stiction compensation
+    u_min: 0.18
+    u_kick: 0.00
+    kick_time_s: 0.00
 
     # I2C
     i2c_dev: "/dev/i2c-1"
     i2c_addr: 88
 
-    # [FL, FR, RL, RR] servo channels
+    # [FL, FR, RL, RR]
     wheel_channels: [2, 3, 0, 1]
     wheel_gains:    [1.0, 1.0, 1.0, 1.0]
 
@@ -47,7 +46,7 @@ hardware_node:
     pct_min: -100
     pct_max: 100
 
-    # Phidget HighSpeed Encoder 1047
+    # Phidget 1047
     phidget_serial: -1
     encoder_channels: [2, 3, 0, 1]
 
