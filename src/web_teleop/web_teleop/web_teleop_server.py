@@ -1,5 +1,6 @@
 import asyncio
 import json
+import signal
 import time
 from pathlib import Path
 
@@ -16,11 +17,10 @@ class CmdVelBridge(Node):
     def __init__(self):
         super().__init__("cmdvel_web_bridge")
 
-        # ROS-Parameter
         self.declare_parameter("cmd_vel_topic", "/cmd_vel")
         self.declare_parameter("max_linear", 0.25)   # m/s
-        self.declare_parameter("max_angular", 0.9)  # rad/s
-        self.declare_parameter("timeout_s", 0.3)    # s (Deadman)
+        self.declare_parameter("max_angular", 0.9)   # rad/s
+        self.declare_parameter("timeout_s", 0.3)     # s (Deadman)
 
         topic = self.get_parameter("cmd_vel_topic").get_parameter_value().string_value
         self.max_linear = float(self.get_parameter("max_linear").value)
@@ -33,12 +33,14 @@ class CmdVelBridge(Node):
         self._v = 0.0
         self._w = 0.0
 
-        # 20 Hz Publish
+        # 20 Hz
         self.create_timer(0.05, self._timer_cb)
 
     def update(self, v: float, w: float):
-        self._v = max(-self.max_linear, min(self.max_linear, v))
-        self._w = max(-self.max_angular, min(self.max_angular, w))
+        v = max(-self.max_linear, min(self.max_linear, v))
+        w = max(-self.max_angular, min(self.max_angular, w))
+        self._v = v
+        self._w = w
         self._last_rx = time.monotonic()
 
     def _timer_cb(self):
@@ -52,31 +54,29 @@ class CmdVelBridge(Node):
         self.publisher_.publish(msg)
 
 
-async def ros_spin(node: Node):
-    while rclpy.ok():
-        rclpy.spin_once(node, timeout_sec=0.0)
-        await asyncio.sleep(0.001)
+async def ros_spin(node: Node, stop_event: asyncio.Event):
+    # spin_once in einer asyncio-Schleife, bis stop_event gesetzt ist
+    try:
+        while rclpy.ok() and not stop_event.is_set():
+            rclpy.spin_once(node, timeout_sec=0.0)
+            await asyncio.sleep(0.001)
+    except asyncio.CancelledError:
+        # Task wird beim Shutdown gecancelt
+        pass
 
 
-async def main_async():
-    rclpy.init()
-    bridge = CmdVelBridge()
-
-    # Absoluter Pfad relativ zur Datei
+def build_app(bridge: CmdVelBridge) -> FastAPI:
     pkg_dir = Path(__file__).resolve().parent
     static_dir = pkg_dir / "static"
     index_file = static_dir / "index.html"
 
     if not static_dir.is_dir():
         raise RuntimeError(f"Static directory not found: {static_dir}")
+    if not index_file.is_file():
+        raise RuntimeError(f"Index file not found: {index_file}")
 
     app = FastAPI()
-
-    app.mount(
-        "/static",
-        StaticFiles(directory=str(static_dir)),
-        name="static"
-    )
+    app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
     @app.get("/")
     def index():
@@ -89,31 +89,77 @@ async def main_async():
             while True:
                 data = await ws.receive_text()
                 obj = json.loads(data)
-                bridge.update(
-                    float(obj.get("v", 0.0)),
-                    float(obj.get("w", 0.0))
-                )
+                bridge.update(float(obj.get("v", 0.0)), float(obj.get("w", 0.0)))
                 await ws.send_text('{"ok": true}')
         except (WebSocketDisconnect, json.JSONDecodeError, ValueError):
-            # Deadman im ROS-Node stoppt sicher
             return
 
+    return app
+
+
+async def main_async():
     import uvicorn
+
+    rclpy.init()
+    bridge = CmdVelBridge()
+    app = build_app(bridge)
+
     config = uvicorn.Config(
         app=app,
         host="0.0.0.0",
         port=8000,
-        log_level="info"
+        log_level="info",
     )
     server = uvicorn.Server(config)
 
-    await asyncio.gather(
-        server.serve(),
-        ros_spin(bridge)
-    )
+    stop_event = asyncio.Event()
 
-    bridge.destroy_node()
-    rclpy.shutdown()
+    loop = asyncio.get_running_loop()
+
+    def request_shutdown():
+        # Uvicorn und ROS Tasks zum Beenden auffordern
+        stop_event.set()
+        server.should_exit = True
+
+    # Sauberes Ctrl+C / systemd stop
+    try:
+        loop.add_signal_handler(signal.SIGINT, request_shutdown)
+        loop.add_signal_handler(signal.SIGTERM, request_shutdown)
+    except NotImplementedError:
+        # Fallback (z.B. auf Plattformen ohne add_signal_handler)
+        signal.signal(signal.SIGINT, lambda *_: request_shutdown())
+        signal.signal(signal.SIGTERM, lambda *_: request_shutdown())
+
+    ros_task = asyncio.create_task(ros_spin(bridge, stop_event))
+    web_task = asyncio.create_task(server.serve())
+
+    try:
+        # Warte bis einer fertig ist (oder Signal kommt)
+        done, pending = await asyncio.wait(
+            {ros_task, web_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+
+        # Wenn Uvicorn beendet (oder Signal), Shutdown anstoßen
+        request_shutdown()
+
+        # Restliche Tasks beenden
+        for t in pending:
+            t.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+
+    finally:
+        # ROS sauber runterfahren
+        try:
+            bridge.destroy_node()
+        except Exception:
+            pass
+
+        try:
+            if rclpy.ok():
+                rclpy.shutdown()
+        except Exception:
+            pass
 
 
 def main():
