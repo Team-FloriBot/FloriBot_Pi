@@ -2,26 +2,76 @@
 <html lang="de">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>FloriBot Web Teleop (1 Stick)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+  <title>FloriBot Web Teleop (Touch Joystick)</title>
   <style>
-    body { font-family: sans-serif; margin: 24px; }
-    .card { padding: 14px; border: 1px solid #ddd; border-radius: 10px; max-width: 560px; }
-    .row { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 10px; align-items: center; }
-    label { display: inline-block; min-width: 180px; }
-    input[type="range"] { width: 260px; }
-    .status { margin-top: 10px; }
+    body { font-family: sans-serif; margin: 20px; }
+    .wrap { max-width: 720px; }
+    .card {
+      padding: 14px; border: 1px solid #ddd; border-radius: 12px;
+      display: grid; gap: 10px;
+    }
+    .status { margin: 0; }
     code { background: #f6f6f6; padding: 2px 6px; border-radius: 6px; }
-    .hint { color: #444; line-height: 1.4; margin-top: 10px; }
+    .row { display: grid; grid-template-columns: 200px 1fr 70px; gap: 10px; align-items: center; }
+    input[type="range"] { width: 100%; }
+
+    /* Joystick */
+    .joy-area {
+      margin-top: 14px;
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 12px;
+      align-items: center;
+      justify-items: center;
+    }
+    .joystick {
+      width: min(70vw, 320px);
+      aspect-ratio: 1 / 1;
+      border-radius: 999px;
+      border: 2px solid #bbb;
+      background: radial-gradient(circle at 30% 30%, #fafafa, #eaeaea);
+      position: relative;
+      touch-action: none; /* wichtig für Pointer Events + kein Scroll */
+      user-select: none;
+    }
+    .stick {
+      width: 34%;
+      height: 34%;
+      border-radius: 999px;
+      border: 2px solid #888;
+      background: radial-gradient(circle at 30% 30%, #ffffff, #dcdcdc);
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+    }
+    .center-dot {
+      width: 8px; height: 8px; border-radius: 999px;
+      background: #888;
+      position: absolute;
+      left: 50%; top: 50%;
+      transform: translate(-50%, -50%);
+      opacity: 0.7;
+      pointer-events: none;
+    }
+    .hint { color: #444; line-height: 1.45; margin: 0; }
+    .btnrow { display:flex; gap:10px; flex-wrap: wrap; }
+    button {
+      padding: 10px 14px; border-radius: 10px; border: 1px solid #bbb;
+      background: #f7f7f7; font-size: 16px;
+    }
+    button:active { background: #eaeaea; }
   </style>
 </head>
 <body>
-  <h2>Web Teleop (1 Joystick → /cmd_vel)</h2>
+<div class="wrap">
+  <h2>Web Teleop (Touch-Joystick → /cmd_vel)</h2>
 
   <div class="card">
-    <div class="status" id="wsStatus">WebSocket: nicht verbunden</div>
-    <div class="status" id="gpStatus">Joystick: nicht verbunden</div>
-    <div class="status">Sende: <code id="out">v=0.00 m/s, w=0.00 rad/s</code></div>
+    <p class="status" id="wsStatus">WebSocket: nicht verbunden</p>
+    <p class="status">Sende: <code id="out">v=0.00 m/s, w=0.00 rad/s</code></p>
 
     <div class="row">
       <label for="vmax">Max vor/zurück (m/s)</label>
@@ -37,8 +87,8 @@
 
     <div class="row">
       <label for="deadzone">Deadzone</label>
-      <input id="deadzone" type="range" min="0.00" max="0.30" step="0.01" value="0.08" />
-      <span id="deadzoneVal">0.08</span>
+      <input id="deadzone" type="range" min="0.00" max="0.30" step="0.01" value="0.06" />
+      <span id="deadzoneVal">0.06</span>
     </div>
 
     <div class="row">
@@ -47,20 +97,32 @@
       <span id="expoVal">1.6</span>
     </div>
 
-    <div class="hint">
-      Steuerung: <b>ein Stick</b><br>
-      <b>hoch</b> = vorwärts, <b>runter</b> = rückwärts, <b>links/rechts</b> = drehen.<br>
-      Hinweis: Manche Browser liefern Achsenwerte erst, nachdem du einmal einen Button am Controller gedrückt hast.
+    <div class="btnrow">
+      <button id="stopBtn">Stop</button>
+      <button id="recenterBtn">Stick zentrieren</button>
+    </div>
+
+    <p class="hint">
+      Bedienung: Ziehen im Kreis = fahren.<br>
+      Hoch = vorwärts, runter = rückwärts, links/rechts = drehen.<br>
+      Beim Loslassen stoppt der Roboter (zusätzlich Deadman im Server).
+    </p>
+
+    <div class="joy-area">
+      <div class="joystick" id="joystick">
+        <div class="center-dot"></div>
+        <div class="stick" id="stick"></div>
+      </div>
     </div>
   </div>
+</div>
 
 <script>
   // ---------- WebSocket ----------
   const wsStatus = document.getElementById("wsStatus");
-  const gpStatus = document.getElementById("gpStatus");
   const outEl = document.getElementById("out");
-
   const ws = new WebSocket(`ws://${location.host}/ws`);
+
   ws.onopen = () => wsStatus.textContent = "WebSocket: verbunden";
   ws.onclose = () => wsStatus.textContent = "WebSocket: getrennt";
 
@@ -93,76 +155,151 @@
   // ---------- Math helpers ----------
   function clamp(x, lo, hi) { return Math.max(lo, Math.min(hi, x)); }
 
-  function applyDeadzone(x, dz) {
+  function applyDeadzone01(x, dz) {
     const ax = Math.abs(x);
     if (ax < dz) return 0.0;
     const sign = Math.sign(x);
-    const scaled = (ax - dz) / (1.0 - dz); // rescale to [0..1]
+    const scaled = (ax - dz) / (1.0 - dz);
     return sign * scaled;
   }
 
-  // Expo: |x|^e mit Vorzeichen, e>1 => feinfühlig um 0
   function applyExpo(x, e) {
     const sign = Math.sign(x);
     return sign * Math.pow(Math.abs(x), e);
   }
 
-  function getBestGamepad() {
-    const gps = navigator.getGamepads ? navigator.getGamepads() : [];
-    for (const gp of gps) {
-      if (gp && gp.connected) return gp;
-    }
-    return null;
+  // ---------- Joystick state (normalized: x,y in [-1..1]) ----------
+  const joy = document.getElementById("joystick");
+  const stick = document.getElementById("stick");
+
+  let active = false;
+  let pointerId = null;
+
+  // normalized command from joystick
+  let jx = 0.0; // left/right
+  let jy = 0.0; // up/down (positive up in our convention)
+
+  function setStickVisual(nx, ny) {
+    // nx, ny in [-1..1]
+    const rect = joy.getBoundingClientRect();
+    const radius = rect.width * 0.5;
+    const maxTravel = radius * 0.55; // knob travel limit
+
+    const px = nx * maxTravel;
+    const py = -ny * maxTravel; // screen y downwards
+
+    stick.style.transform = `translate(${px}px, ${py}px) translate(-50%, -50%)`;
   }
 
-  let lastId = "";
+  function resetJoystick() {
+    jx = 0.0; jy = 0.0;
+    setStickVisual(0.0, 0.0);
+  }
 
-  window.addEventListener("gamepadconnected", (e) => {
-    lastId = e.gamepad.id;
-    gpStatus.textContent = `Joystick: verbunden (${lastId})`;
+  function updateFromPointer(clientX, clientY) {
+    const rect = joy.getBoundingClientRect();
+    const cx = rect.left + rect.width * 0.5;
+    const cy = rect.top + rect.height * 0.5;
+
+    // dx,dy in pixels relative to center
+    let dx = clientX - cx;
+    let dy = clientY - cy;
+
+    const radius = rect.width * 0.5;
+    const maxTravel = radius * 0.55;
+
+    // clamp to circle
+    const dist = Math.hypot(dx, dy);
+    if (dist > maxTravel && dist > 0) {
+      dx = dx * (maxTravel / dist);
+      dy = dy * (maxTravel / dist);
+    }
+
+    // normalize to [-1..1]
+    const nx = dx / maxTravel;
+    const ny = -dy / maxTravel; // positive when moving up
+
+    jx = clamp(nx, -1.0, 1.0);
+    jy = clamp(ny, -1.0, 1.0);
+
+    setStickVisual(jx, jy);
+  }
+
+  joy.addEventListener("pointerdown", (e) => {
+    active = true;
+    pointerId = e.pointerId;
+    joy.setPointerCapture(pointerId);
+    updateFromPointer(e.clientX, e.clientY);
   });
-  window.addEventListener("gamepaddisconnected", () => {
-    lastId = "";
-    gpStatus.textContent = "Joystick: nicht verbunden";
+
+  joy.addEventListener("pointermove", (e) => {
+    if (!active || e.pointerId !== pointerId) return;
+    updateFromPointer(e.clientX, e.clientY);
+  });
+
+  function endPointer(e) {
+    if (e.pointerId !== pointerId) return;
+    active = false;
+    pointerId = null;
+    resetJoystick();
+    // sofort Stop senden (zusätzlich Deadman im Server)
+    send(0.0, 0.0);
+    outEl.textContent = `v=0.00 m/s, w=0.00 rad/s`;
+  }
+
+  joy.addEventListener("pointerup", endPointer);
+  joy.addEventListener("pointercancel", endPointer);
+  joy.addEventListener("lostpointercapture", () => {
+    if (active) {
+      active = false;
+      pointerId = null;
+      resetJoystick();
+    }
+  });
+
+  document.getElementById("stopBtn").addEventListener("click", () => {
+    resetJoystick();
+    send(0.0, 0.0);
+    outEl.textContent = `v=0.00 m/s, w=0.00 rad/s`;
+  });
+
+  document.getElementById("recenterBtn").addEventListener("click", () => {
+    resetJoystick();
   });
 
   // ---------- Control loop (20 Hz) ----------
   const PERIOD_MS = 50;
 
   setInterval(() => {
-    const gp = getBestGamepad();
+    // Wenn nicht aktiv: trotzdem regelmäßig Stop senden (optional).
+    // Der Server hat Deadman; dieses Stop macht es "snappier".
+    const dz = Number(deadzone.value);
+    const e  = Number(expo.value);
 
-    if (!gp) {
-      gpStatus.textContent = "Joystick: nicht verbunden";
+    // Deadzone + Expo auf Joystick-Normwerte
+    const x = applyExpo(applyDeadzone01(jx, dz), e);
+    const y = applyExpo(applyDeadzone01(jy, dz), e);
+
+    // Mapping: y -> v (vorwärts), x -> w (drehen)
+    const vMax = Number(vmax.value);
+    const wMax = Number(wmax.value);
+
+    const v = clamp(y * vMax, -vMax, vMax);
+    const w = clamp(x * wMax, -wMax, wMax);
+
+    // Wenn nicht aktiv, optional "hart" stoppen:
+    if (!active) {
       send(0.0, 0.0);
       outEl.textContent = `v=0.00 m/s, w=0.00 rad/s`;
       return;
     }
 
-    // Ein Stick: nimm linken Stick (üblich)
-    // axes[0]=LS X, axes[1]=LS Y
-    let x = gp.axes[0] ?? 0.0;  // links/rechts
-    let y = gp.axes[1] ?? 0.0;  // hoch/runter (oben = -1)
-
-    const dz = Number(deadzone.value);
-    const e  = Number(expo.value);
-
-    x = applyExpo(applyDeadzone(x, dz), e);
-    y = applyExpo(applyDeadzone(y, dz), e);
-
-    // Mapping:
-    // v: vorwärts = -y
-    // w: drehen = x
-    const vMax = Number(vmax.value);
-    const wMax = Number(wmax.value);
-
-    const v = clamp((-y) * vMax, -vMax, vMax);
-    const w = clamp(( x) * wMax, -wMax, wMax);
-
     send(v, w);
     outEl.textContent = `v=${v.toFixed(2)} m/s, w=${w.toFixed(2)} rad/s`;
-    gpStatus.textContent = `Joystick: verbunden (${gp.id})`;
   }, PERIOD_MS);
+
+  // Initial visual
+  resetJoystick();
 </script>
 </body>
 </html>
