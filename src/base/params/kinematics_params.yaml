@@ -2,9 +2,10 @@ kinematics_node:
   ros__parameters:
     wheel_separation: 0.385
 
-    # Geometrisch: D=0.186 m -> r=0.093 m
-    # Kalibriert: 2.00m Soll -> 2.15m Ist => r_new = 0.093 * 2.00/2.15 = 0.0865 m
-    wheel_radius: 0.0865
+    # Kalibrierung:
+    # Odom stoppt bei 2.00 m, real gemessen 2.26 m
+    # => r_new = r_old * 2.26/2.00 = 0.093 * 1.13 = 0.1051 m
+    wheel_radius: 0.1051
 
     ticks_per_rev: 131000.0
 
