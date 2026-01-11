@@ -1,4 +1,3 @@
-// src/nodes/hardware_node.cpp
 #include <rclcpp/rclcpp.hpp>
 
 #include <algorithm>
@@ -87,6 +86,11 @@ static inline double clampDouble(double v, double lo, double hi)
   return std::max(lo, std::min(v, hi));
 }
 
+static inline int signum(double x)
+{
+  return (x > 0.0) - (x < 0.0);
+}
+
 class HardwareNode : public rclcpp::Node
 {
 public:
@@ -96,42 +100,37 @@ public:
     declareParams();
     getParams();
 
-    // I2C open
     nxt_.openBus(i2c_dev_, i2c_addr_);
 
-    // ROS I/O
     wheel_cmd_sub_ = create_subscription<base::msg::WheelVelocities>(
       wheel_cmd_topic_, rclcpp::QoS(10),
       std::bind(&HardwareNode::onWheelCmd, this, std::placeholders::_1));
 
     ticks_pub_ = create_publisher<base::msg::WheelTicks4>(wheel_ticks_topic_, rclcpp::QoS(10));
 
-    // Encoders (Phidget22 callbacks like encodertest)
     initEncoders();
 
-    // Control timer
     timer_ = create_wall_timer(
       std::chrono::duration<double>(control_dt_),
       std::bind(&HardwareNode::controlLoop, this));
 
+    ticks_timer_ = create_wall_timer(
+      std::chrono::milliseconds(std::max(5, publish_ticks_ms_)),
+      std::bind(&HardwareNode::publishTicks, this));
+
+    last_speed_eval_time_ = now();
+
     RCLCPP_INFO(get_logger(),
-      "hardware_node started | I2C %s addr=0x%02x | wheel_cmd=%s | wheel_ticks=%s | dt=%.3f | ticks_per_rev=%.1f",
-      i2c_dev_.c_str(), i2c_addr_, wheel_cmd_topic_.c_str(), wheel_ticks_topic_.c_str(),
-      control_dt_, ticks_per_rev_);
-    RCLCPP_INFO(get_logger(),
-      "Enc map: FL=%d FR=%d RL=%d RR=%d | invert FL=%d FR=%d RL=%d RR=%d | serial=%d",
-      encoder_channels_[FL], encoder_channels_[FR], encoder_channels_[RL], encoder_channels_[RR],
-      (int)invert_[FL], (int)invert_[FR], (int)invert_[RL], (int)invert_[RR],
-      phidget_serial_);
+      "hardware_node: dt=%.3f speed_window=%.3f ticks_per_rev=%.1f | u_min=%.2f u_kick=%.2f kick_time=%.2f",
+      control_dt_, speed_window_s_, ticks_per_rev_, u_min_, u_kick_, kick_time_s_);
   }
 
   ~HardwareNode() override
   {
-    // stop motors
     for (int i = 0; i < WHEEL_COUNT; ++i) {
       try { writeMotor(i, 0.0); } catch (...) {}
     }
-    // close encoders
+
     for (auto &h : enc_) {
       if (h) {
         Phidget_close((PhidgetHandle)h);
@@ -139,6 +138,7 @@ public:
         h = nullptr;
       }
     }
+
     nxt_.closeBus();
   }
 
@@ -146,38 +146,43 @@ private:
   enum WheelIndex { FL = 0, FR = 1, RL = 2, RR = 3, WHEEL_COUNT = 4 };
 
   // ---------------- Params ----------------
-  // Topics
   std::string wheel_cmd_topic_{"/wheel_commands"};
   std::string wheel_ticks_topic_{"/base/wheel_ticks4"};
   std::string ticks_frame_id_{"base_link"};
 
-  // Control
   double control_dt_{0.02};
 
-  // Encoder scaling: ticks -> rad
-  double ticks_per_rev_{2048.0};
+  // ticks per WHEEL revolution
+  double ticks_per_rev_{131000.0};
 
   // PID
-  double kp_{0.12};
-  double ki_{0.25};
+  double kp_{0.06};
+  double ki_{0.30};
   double kd_{0.0};
   double output_limit_{1.0};
   double deadband_{0.10};
-  double setpoint_max_accel_{6.0};
+  double setpoint_max_accel_{1.5};
   double stop_eps_radps_{0.05};
 
-  // Measurement filtering
-  double meas_alpha_{0.30};
-  double meas_w_eps_{0.05};
+  // Measurement filter
+  double meas_alpha_{0.25};
+  double meas_w_eps_{0.03};
+
+  // speed estimation window (key for low-speed stability)
+  double speed_window_s_{0.10}; // 100 ms
 
   // Output slew
-  double u_slew_rate_{3.0}; // 1/s, 0 disables
+  double u_slew_rate_{1.0}; // 1/s, 0 disables
 
-  // I2C/motor mapping
+  // Stiction compensation
+  double u_min_{0.18};        // minimum output when moving
+  double u_kick_{0.0};        // optional start kick (additional)
+  double kick_time_s_{0.0};   // duration after sign change / start
+
+  // I2C
   std::string i2c_dev_{"/dev/i2c-1"};
   int i2c_addr_{0x58};
 
-  // [FL, FR, RL, RR] -> servo channels
   std::array<int,4> wheel_channels_{{2, 3, 0, 1}};
   std::array<double,4> wheel_gains_{{1.0, 1.0, 1.0, 1.0}};
 
@@ -188,11 +193,9 @@ private:
   int pct_min_{-100};
   int pct_max_{100};
 
-  // Phidget encoder mapping
+  // Phidget
   int phidget_serial_{-1};
-  std::array<int,4> encoder_channels_{{2, 3, 0, 1}}; // [FL, FR, RL, RR]
-
-  // per wheel invert (du willst FL+RL invertiert)
+  std::array<int,4> encoder_channels_{{2, 3, 0, 1}};
   std::array<bool,4> invert_{{true, false, true, false}};
 
   int publish_ticks_ms_{20};
@@ -206,24 +209,25 @@ private:
   // ---------------- State ----------------
   NxtServoI2C nxt_;
 
-  // Setpoints (rad/s)
   double target_w_radps_[WHEEL_COUNT]{0.0, 0.0, 0.0, 0.0};
 
-  // PID
   std::array<std::unique_ptr<base::PIDController>, WHEEL_COUNT> pid_{};
   double u_last_[WHEEL_COUNT]{0.0, 0.0, 0.0, 0.0};
 
-  // Encoder ticks (continuous, callback-accumulated)
   std::array<std::atomic<int64_t>, WHEEL_COUNT> ticks_{};
-  int64_t ticks_last_for_speed_[WHEEL_COUNT]{0, 0, 0, 0};
+  int64_t ticks_last_speed_[WHEEL_COUNT]{0, 0, 0, 0};
 
-  // measured speeds (filtered)
   double meas_w_filt_[WHEEL_COUNT]{0.0, 0.0, 0.0, 0.0};
 
-  // Phidget handles
+  rclcpp::Time last_speed_eval_time_;
+
+  // kick state
+  rclcpp::Time kick_until_[WHEEL_COUNT];
+  int last_dir_[WHEEL_COUNT]{0,0,0,0};
+
   std::array<PhidgetEncoderHandle, WHEEL_COUNT> enc_{{nullptr, nullptr, nullptr, nullptr}};
 
-  // ---------------- Params plumbing ----------------
+  // ---------------- Params ----------------
   void declareParams()
   {
     declare_parameter<std::string>("wheel_cmd_topic", wheel_cmd_topic_);
@@ -244,7 +248,13 @@ private:
     declare_parameter<double>("meas_alpha", meas_alpha_);
     declare_parameter<double>("meas_w_eps", meas_w_eps_);
 
+    declare_parameter<double>("speed_window_s", speed_window_s_);
+
     declare_parameter<double>("u_slew_rate", u_slew_rate_);
+
+    declare_parameter<double>("u_min", u_min_);
+    declare_parameter<double>("u_kick", u_kick_);
+    declare_parameter<double>("kick_time_s", kick_time_s_);
 
     declare_parameter<std::string>("i2c_dev", i2c_dev_);
     declare_parameter<int>("i2c_addr", i2c_addr_);
@@ -259,7 +269,6 @@ private:
     declare_parameter<int>("pct_min", pct_min_);
     declare_parameter<int>("pct_max", pct_max_);
 
-    // Phidget encoder params like encodertest
     declare_parameter<int>("phidget_serial", phidget_serial_);
     declare_parameter<std::vector<int64_t>>("encoder_channels", std::vector<int64_t>{2, 3, 0, 1});
 
@@ -291,7 +300,13 @@ private:
     meas_alpha_ = clampDouble(get_parameter("meas_alpha").as_double(), 0.0, 1.0);
     meas_w_eps_ = get_parameter("meas_w_eps").as_double();
 
+    speed_window_s_ = std::max(0.02, get_parameter("speed_window_s").as_double());
+
     u_slew_rate_ = get_parameter("u_slew_rate").as_double();
+
+    u_min_ = clampDouble(get_parameter("u_min").as_double(), 0.0, 1.0);
+    u_kick_ = clampDouble(get_parameter("u_kick").as_double(), 0.0, 1.0);
+    kick_time_s_ = std::max(0.0, get_parameter("kick_time_s").as_double());
 
     i2c_dev_  = get_parameter("i2c_dev").as_string();
     i2c_addr_ = get_parameter("i2c_addr").as_int();
@@ -336,22 +351,24 @@ private:
         kp_, ki_, kd_, output_limit_, deadband_, setpoint_max_accel_);
       pid_[i]->reset();
       ticks_[i].store(0, std::memory_order_relaxed);
+      ticks_last_speed_[i] = 0;
       meas_w_filt_[i] = 0.0;
       u_last_[i] = 0.0;
+      last_dir_[i] = 0;
+      kick_until_[i] = now();
     }
   }
 
   // ---------------- Wheel command ----------------
   void onWheelCmd(const base::msg::WheelVelocities::SharedPtr msg)
   {
-    // 4WD diff: left applies to FL+RL, right to FR+RR
     target_w_radps_[FL] = msg->left;
     target_w_radps_[RL] = msg->left;
     target_w_radps_[FR] = msg->right;
     target_w_radps_[RR] = msg->right;
   }
 
-  // ---------------- Phidget callbacks (encodertest style) ----------------
+  // ---------------- Phidget callbacks ----------------
   static void CCONV onPositionChange(
     PhidgetEncoderHandle ch,
     void *ctx,
@@ -382,46 +399,48 @@ private:
           "Phidget_setDeviceSerialNumber");
       }
 
-      phidget_check(
-        Phidget_setChannel((PhidgetHandle)h, encoder_channels_[i]),
-        "Phidget_setChannel");
-
+      phidget_check(Phidget_setChannel((PhidgetHandle)h, encoder_channels_[i]), "Phidget_setChannel");
       phidget_check(
         PhidgetEncoder_setOnPositionChangeHandler(h, &HardwareNode::onPositionChange, this),
         "PhidgetEncoder_setOnPositionChangeHandler");
+      phidget_check(Phidget_openWaitForAttachment((PhidgetHandle)h, 5000), "Phidget_openWaitForAttachment");
 
-      phidget_check(
-        Phidget_openWaitForAttachment((PhidgetHandle)h, 5000),
-        "Phidget_openWaitForAttachment");
-
-      // Start at 0 for clean continuous ticks
       phidget_check(PhidgetEncoder_setPosition(h, 0), "PhidgetEncoder_setPosition");
 
       enc_[i] = h;
       ticks_[i].store(0, std::memory_order_relaxed);
     }
+  }
 
-    // Publish timer (optional, but keeps /wheel_ticks4 regular like encodertest)
-    ticks_timer_ = create_wall_timer(
-      std::chrono::milliseconds(std::max(5, publish_ticks_ms_)),
-      std::bind(&HardwareNode::publishTicks, this));
+  // ---------------- Speed estimation over window ----------------
+  void updateMeasuredSpeeds()
+  {
+    const rclcpp::Time t = now();
+    const double dt = (t - last_speed_eval_time_).seconds();
+    if (dt < speed_window_s_) return;
+
+    const double k = (2.0 * M_PI) / ticks_per_rev_;
+
+    for (int i = 0; i < WHEEL_COUNT; ++i) {
+      const int64_t cur = ticks_[i].load(std::memory_order_relaxed);
+      const int64_t d = cur - ticks_last_speed_[i];
+      ticks_last_speed_[i] = cur;
+
+      double w = (static_cast<double>(d) * k) / dt; // rad/s
+
+      if (std::abs(w) < meas_w_eps_) w = 0.0;
+      meas_w_filt_[i] = meas_alpha_ * w + (1.0 - meas_alpha_) * meas_w_filt_[i];
+    }
+
+    last_speed_eval_time_ = t;
   }
 
   // ---------------- Control loop ----------------
   void controlLoop()
   {
-    // speed from delta ticks per control_dt (ticks are callback-accumulated)
-    for (int i = 0; i < WHEEL_COUNT; ++i) {
-      const int64_t t = ticks_[i].load(std::memory_order_relaxed);
-      const int64_t dticks = t - ticks_last_for_speed_[i];
-      ticks_last_for_speed_[i] = t;
+    updateMeasuredSpeeds();
 
-      const double rad = (static_cast<double>(dticks) * 2.0 * M_PI) / ticks_per_rev_;
-      double w = rad / control_dt_;
-
-      if (std::abs(w) < meas_w_eps_) w = 0.0;
-      meas_w_filt_[i] = meas_alpha_ * w + (1.0 - meas_alpha_) * meas_w_filt_[i];
-    }
+    const rclcpp::Time t = now();
 
     for (int i = 0; i < WHEEL_COUNT; ++i) {
       const double sp = target_w_radps_[i];
@@ -429,18 +448,41 @@ private:
       if (std::abs(sp) < stop_eps_radps_) {
         pid_[i]->reset();
         u_last_[i] = 0.0;
+        last_dir_[i] = 0;
         writeMotor(i, 0.0);
         continue;
       }
 
+      const int dir = signum(sp);
+      if (dir != 0 && dir != last_dir_[i]) {
+        // direction change or start -> allow kick window
+        kick_until_[i] = t + rclcpp::Duration::from_seconds(kick_time_s_);
+        last_dir_[i] = dir;
+      }
+
       double u = pid_[i]->compute(sp, meas_w_filt_[i], control_dt_);
 
+      // stiction compensation: enforce minimum output when moving
+      if (dir != 0) {
+        if (std::abs(u) < u_min_) {
+          u = static_cast<double>(dir) * u_min_;
+        }
+      }
+
+      // optional start kick (additive)
+      if (u_kick_ > 0.0 && kick_time_s_ > 0.0) {
+        if (t < kick_until_[i]) {
+          u = clampDouble(u + static_cast<double>(dir) * u_kick_, -output_limit_, output_limit_);
+        }
+      }
+
+      // output slew limiting
       if (u_slew_rate_ > 0.0) {
         const double du_max = u_slew_rate_ * control_dt_;
         u = clampDouble(u, u_last_[i] - du_max, u_last_[i] + du_max);
       }
-      u_last_[i] = u;
 
+      u_last_[i] = u;
       writeMotor(i, u);
     }
   }
@@ -470,6 +512,7 @@ private:
   void writeMotor(int wheel, double u_norm)
   {
     const double u = clampDouble(u_norm * wheel_gains_[wheel], -output_limit_, output_limit_);
+
     int pct = static_cast<int>(std::lround((u / output_limit_) * 100.0));
     pct = clampInt(pct, pct_min_, pct_max_);
 
