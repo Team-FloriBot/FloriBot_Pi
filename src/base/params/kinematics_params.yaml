@@ -1,21 +1,17 @@
 kinematics_node:
   ros__parameters:
-    # Robot geometry
-    wheel_separation: 0.30     # [m] track width left<->right
-    wheel_radius: 0.05         # [m]
+    wheel_separation: 0.385
+    wheel_radius: 0.100
 
-    # Encoder model
     ticks_per_rev: 2048.0
     unwrap_modulo: true
     modulo_ticks: 2048
 
-    # Topics (FloriBot1.0-like responsibilities)
     cmd_vel_topic: "/cmd_vel"
     wheel_cmd_topic: "/wheel_commands"
     wheel_ticks_topic: "/base/wheel_ticks4"
     odom_topic: "/odom"
 
-    # Frames
     odom_frame_id: "odom"
     base_frame_id: "base_link"
     publish_tf: true
