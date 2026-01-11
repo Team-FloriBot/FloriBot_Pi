@@ -9,31 +9,39 @@ hardware_node:
 
     # ---------- Controller ----------
     kp: 0.05
-    ki: 0.12
+    ki: 0.10
     kd: 0.0
     output_limit: 1.0
 
-    # Totband etwas kleiner gegen An/Aus
-    deadband: 0.06
+    # mit weichem Feedforward darf deadband kleiner sein,
+    # ohne dass "hart an/aus" entsteht
+    deadband: 0.03
 
+    # weniger aggressiv als früher -> weniger Überschwingen
     setpoint_max_accel: 2.0
     stop_eps_radps: 0.10
 
     # ---------- Measurement ----------
     meas_alpha: 0.20
     meas_w_eps: 0.03
-
-    # leicht mehr Glättung als 0.07, aber deutlich weniger als 0.15
     speed_window_s: 0.09
 
     # ---------- Actuator shaping ----------
-    # etwas weniger Slew, damit PI nicht "gegen die Rampe" arbeitet
+    # Slew bleibt aktiv, jetzt aber integrator-sicher (freeze bei Begrenzung)
     u_slew_rate: 1.2
 
-    # u_min reduzieren, damit keine Grenzschwingung um den Sollwert entsteht
-    u_min: 0.14
+    # ---------- Friction feedforward (smooth) ----------
+    # u_min = Feedforward-Amplitude (0..1), NICHT mehr harte Mindeststellgröße
+    u_min: 0.18
+
+    # Feedforward nur wenn |setpoint| >= Schwelle
     u_min_apply_radps: 0.35
 
+    # Formparameter: je größer, desto weicher/langsamer steigt u_ff mit |sp|
+    # typische brauchbare Spanne: 0.8 .. 3.0
+    u_ff_w0_radps: 1.5
+
+    # optionaler Kick bleibt aus
     u_kick: 0.00
     kick_time_s: 0.00
 
