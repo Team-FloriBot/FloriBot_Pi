@@ -6,16 +6,9 @@ hardware_node:
 
     control_dt: 0.02
 
-    # ticks_per_rev: scale to rad (effective)
+    # Encoder scale for rad conversion (MUSS zu deiner Mechanik passen)
+    # Wenn Geschwindigkeit/Regelung zu aggressiv wirkt: ticks_per_rev prüfen.
     ticks_per_rev: 2048.0
-
-    # modulo_ticks: wrap period of raw encoder reading (0..N..0)
-    # set this to what you actually see (2000 or 2048)
-    modulo_ticks: 2048
-    unwrap_enabled: true
-
-    # if /joint_states stalls, stop (prevents "meas=0" spikes)
-    jointstate_timeout_s: 0.20
 
     # PID
     kp: 0.12
@@ -26,32 +19,18 @@ hardware_node:
     setpoint_max_accel: 6.0
     stop_eps_radps: 0.05
 
-    # measurement processing
+    # Measurement filtering
     meas_alpha: 0.30
-    max_meas_radps: 30.0
-    max_tick_jump: 800
+    meas_w_eps: 0.05
 
-    # output smoothing
+    # Output smoothing
     u_slew_rate: 3.0
 
-    joint_states_topic: "/joint_states"
-
-    # mapping (as you used with phidgets: joint0..joint3)
-    fl_joint: "joint2"
-    fr_joint: "joint3"
-    rl_joint: "joint0"
-    rr_joint: "joint1"
-
-    # you said: FL and RL must be inverted
-    invert_fl: true
-    invert_fr: false
-    invert_rl: true
-    invert_rr: false
-
+    # I2C
     i2c_dev: "/dev/i2c-1"
     i2c_addr: 88
 
-    # [FL, FR, RL, RR]
+    # [FL, FR, RL, RR] servo channels
     wheel_channels: [2, 3, 0, 1]
     wheel_gains:    [1.0, 1.0, 1.0, 1.0]
 
@@ -61,3 +40,18 @@ hardware_node:
     max_us: 2100
     pct_min: -100
     pct_max: 100
+
+    # Phidget HighSpeed Encoder 1047
+    # serial -1 = any
+    phidget_serial: -1
+
+    # [FL, FR, RL, RR] phidget channels
+    encoder_channels: [2, 3, 0, 1]
+
+    # Inverts: FL und RL invertiert (wie von dir gesagt)
+    invert_fl: true
+    invert_fr: false
+    invert_rl: true
+    invert_rr: false
+
+    publish_ticks_ms: 20
