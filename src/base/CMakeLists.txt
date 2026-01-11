@@ -18,8 +18,9 @@ find_package(sensor_msgs REQUIRED)
 # Messages
 find_package(rosidl_default_generators REQUIRED)
 
+# Optional: Phidget22 via pkg-config (Ubuntu provides libphidget22.pc)
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(PHIDGET22 QUIET phidget22)
+pkg_check_modules(PHIDGET22 QUIET libphidget22)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/WheelVelocities.msg"
@@ -63,14 +64,13 @@ ament_target_dependencies(hardware_node
   sensor_msgs
 )
 
-# Phidget22 is optional here; in the /joint_states-based version it is not required.
-# Keep the check to allow switching back to direct Phidget usage without changing CMake.
+# Only needed if you compile a hardware_node variant that directly uses Phidget22 C API.
 if(PHIDGET22_FOUND)
   target_include_directories(hardware_node PRIVATE ${PHIDGET22_INCLUDE_DIRS})
   target_link_libraries(hardware_node ${PHIDGET22_LIBRARIES})
   target_compile_definitions(hardware_node PRIVATE HAVE_PHIDGET22=1)
 else()
-  message(WARNING "phidget22 not found via pkg-config; hardware_node will still build.")
+  message(WARNING "libphidget22 not found via pkg-config; hardware_node will still build.")
 endif()
 
 # Jazzy+: replace deprecated rosidl_target_interfaces()
