@@ -4,34 +4,56 @@ hardware_node:
     wheel_ticks_topic: "/base/wheel_ticks4"
     ticks_frame_id: "base_link"
 
+    # Control loop period (s)
     control_dt: 0.02
+
+    # Encoder ticks per wheel revolution
     ticks_per_rev: 131000.0
 
+    # ---------------- Speed estimation / filtering ----------------
+    # speed_window_s is interpreted as a *low-pass time constant* tau (s).
+    # Smaller tau -> faster (less phase lag), more noise.
+    # Larger tau -> smoother, more lag.
+    speed_window_s: 0.05
+
+    # Additional smoothing factor kept for backward compatibility.
+    # 0.0 = no extra smoothing, 1.0 = very strong smoothing.
+    meas_alpha: 0.20
+
+    # Speeds below this are forced to 0 (rad/s) to suppress jitter.
+    meas_w_eps: 0.03
+
+    # ---------------- Controller (start values for tuning) ----------------
+    # Start with PI disabled (ki=0) for the first tuning step.
     kp: 0.05
-    ki: 0.25
-    kd: 0.0
+    ki: 0.00
+    kd: 0.00
+
     output_limit: 1.0
     deadband: 0.10
 
-    # steilere Anfahrrampe
-    setpoint_max_accel: 4.0
+    # Setpoint ramp limit (rad/s^2). Keep moderate during tuning.
+    setpoint_max_accel: 2.0
+
+    # If |setpoint| < stop_eps_radps -> motor command set to 0 and PID reset.
     stop_eps_radps: 0.10
 
-    meas_alpha: 0.20
-    meas_w_eps: 0.03
-    speed_window_s: 0.15
+    # ---------------- Actuator shaping / non-linearities ----------------
+    # Slew limiting on u (1/s). 0 disables.
+    # Disable during tuning to avoid extra lag.
+    u_slew_rate: 0.0
 
-    # steilerer Stellgrößenanstieg
-    u_slew_rate: 2.0
-
-    # stiction compensation (bleibt aktiv)
-    u_min: 0.20
+    # Stiction compensation (minimum output when moving).
+    # Disable during tuning (u_min=0), then re-enable if needed.
+    u_min: 0.00
+    # Apply u_min only if |setpoint| >= this threshold (rad/s)
     u_min_apply_radps: 0.35
 
-    # BOOST AUS
+    # Optional start kick (additive), keep OFF during tuning.
     u_kick: 0.00
     kick_time_s: 0.00
 
+    # ---------------- Hardware ----------------
     i2c_dev: "/dev/i2c-1"
     i2c_addr: 88
 
