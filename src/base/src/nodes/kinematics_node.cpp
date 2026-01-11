@@ -9,6 +9,11 @@ using std::placeholders::_1;
 
 namespace base {
 
+static inline bool isZeroStamp(const builtin_interfaces::msg::Time& t)
+{
+  return (t.sec == 0) && (t.nanosec == 0);
+}
+
 KinematicsNode::KinematicsNode()
 : Node("kinematics_node")
 {
@@ -93,7 +98,7 @@ void KinematicsNode::cmdVelCallback(const geometry_msgs::msg::Twist::SharedPtr m
 
 void KinematicsNode::wheelTicksCallback(const base::msg::WheelTicks4::SharedPtr msg)
 {
-  const rclcpp::Time stamp = (msg->header.stamp.nanoseconds() != 0) ? rclcpp::Time(msg->header.stamp) : now();
+  const rclcpp::Time stamp = isZeroStamp(msg->header.stamp) ? now() : rclcpp::Time(msg->header.stamp);
 
   const int64_t fl = msg->fl_ticks;
   const int64_t fr = msg->fr_ticks;
