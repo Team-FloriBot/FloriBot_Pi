@@ -1,12 +1,12 @@
 kinematics_node:
   ros__parameters:
-    # Spurweite (wird als Nächstes über Rotation kalibriert)
-    wheel_separation: 0.385
+    # Rotation kalibriert:
+    # odom stoppt bei 360°, real 171°
+    # => b_new = b_old * 360/171
+    # bei b_old=0.385 -> b_new=0.8105
+    wheel_separation: 0.8105
 
     # FINAL kalibrierter Radradius
-    # odom: 2.0204 m
-    # real: 2.115 m
-    # Faktor: 1.04678
     wheel_radius: 0.09735
 
     ticks_per_rev: 131000.0
