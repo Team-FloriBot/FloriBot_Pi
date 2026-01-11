@@ -18,6 +18,20 @@ find_package(tf2_ros REQUIRED)
 
 find_package(rosidl_default_generators REQUIRED)
 
+# ---- Phidget22 (no pkg-config required) ----
+find_path(PHIDGET22_INCLUDE_DIR
+  NAMES phidget22.h
+  PATHS /usr/include /usr/local/include
+)
+find_library(PHIDGET22_LIBRARY
+  NAMES phidget22
+  PATHS /usr/lib /usr/lib/aarch64-linux-gnu /usr/local/lib
+)
+
+if(NOT PHIDGET22_INCLUDE_DIR OR NOT PHIDGET22_LIBRARY)
+  message(FATAL_ERROR "phidget22 not found (need libphidget22-dev). Include=${PHIDGET22_INCLUDE_DIR} Lib=${PHIDGET22_LIBRARY}")
+endif()
+
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/WheelVelocities.msg"
   "msg/WheelTicks4.msg"
@@ -57,9 +71,12 @@ target_link_libraries(kinematics_node base_lib)
 add_executable(hardware_node src/nodes/hardware_node.cpp)
 ament_target_dependencies(hardware_node
   rclcpp
-  sensor_msgs
 )
-target_link_libraries(hardware_node base_lib)
+target_include_directories(hardware_node PRIVATE ${PHIDGET22_INCLUDE_DIR})
+target_link_libraries(hardware_node
+  base_lib
+  ${PHIDGET22_LIBRARY}
+)
 
 install(TARGETS
   base_lib
