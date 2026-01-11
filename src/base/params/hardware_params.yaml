@@ -13,23 +13,24 @@ hardware_node:
     output_limit: 1.0
     deadband: 0.10
 
-    # steilere Anfahrrampe (Sollwert-Rampe)
+    # steilere Anfahrrampe
     setpoint_max_accel: 4.0
     stop_eps_radps: 0.10
 
     meas_alpha: 0.20
     meas_w_eps: 0.03
-
     speed_window_s: 0.15
 
     # steilerer Stellgrößenanstieg
     u_slew_rate: 2.0
 
-    # stiction compensation
+    # stiction compensation (bleibt aktiv)
     u_min: 0.20
+    u_min_apply_radps: 0.35
+
+    # BOOST AUS
     u_kick: 0.00
     kick_time_s: 0.00
-    u_min_apply_radps: 0.35
 
     i2c_dev: "/dev/i2c-1"
     i2c_addr: 88
