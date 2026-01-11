@@ -6,7 +6,6 @@
   <title>FloriBot Web Teleop</title>
 
   <style>
-    /* Kein Scrollen, keine Textmarkierung, kein iOS Callout */
     html, body {
       height: 100%;
       margin: 0;
@@ -31,27 +30,10 @@
       box-sizing: border-box;
     }
 
-    .top {
-      display: grid;
-      gap: 6px;
-    }
-
-    .title {
-      font-size: 18px;
-      font-weight: 600;
-      margin: 0;
-    }
-
-    .status {
-      margin: 0;
-      font-size: 14px;
-    }
-
-    .out code {
-      background: #f6f6f6;
-      padding: 2px 6px;
-      border-radius: 6px;
-    }
+    .top { display: grid; gap: 6px; }
+    .title { font-size: 18px; font-weight: 600; margin: 0; }
+    .status { margin: 0; font-size: 14px; }
+    .out code { background: #f6f6f6; padding: 2px 6px; border-radius: 6px; }
 
     .controls {
       display: grid;
@@ -68,10 +50,8 @@
       align-items: center;
       font-size: 14px;
     }
-
     input[type="range"] { width: 100%; }
 
-    /* Joystick */
     .joystick {
       width: min(78vw, 380px);
       max-width: 380px;
@@ -140,7 +120,6 @@
   </div>
 
 <script>
-  // Zusätzlich Standard-Gesten verhindern (iOS/Safari)
   document.addEventListener("gesturestart", (e) => e.preventDefault(), { passive: false });
   document.addEventListener("gesturechange", (e) => e.preventDefault(), { passive: false });
   document.addEventListener("gestureend", (e) => e.preventDefault(), { passive: false });
@@ -175,7 +154,7 @@
   // ---------- Helpers ----------
   function clamp(x, lo, hi) { return Math.max(lo, Math.min(hi, x)); }
 
-  // ---------- Joystick state (normalized) ----------
+  // ---------- Joystick state ----------
   const joy = document.getElementById("joystick");
   const stick = document.getElementById("stick");
 
@@ -270,11 +249,9 @@
     // v: hoch = vorwärts, runter = rückwärts
     const v = clamp(jy * vMax, -vMax, vMax);
 
-    // w: rechts am Stick -> rechts drehen (Basisvorzeichen -jx)
-    // Beim Rückwärtsfahren soll links/rechts nicht "gefühlt" invertieren:
-    // => invertiere w, wenn jy < 0 (rückwärts)
-    const steerSign = (jy >= 0.0) ? 1.0 : -1.0;
-    const w = clamp(((-jx) * wMax) * steerSign, -wMax, wMax);
+    // w: Stick rechts -> Roboter dreht rechts (um eigene Achse)
+    // (REP-103: +w ist links/CCW, daher negatives Vorzeichen für "rechts/CW")
+    const w = clamp((-jx) * wMax, -wMax, wMax);
 
     if (!active) {
       send(0.0, 0.0);
