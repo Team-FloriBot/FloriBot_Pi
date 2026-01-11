@@ -31,9 +31,36 @@
     }
 
     .top { display: grid; gap: 6px; }
-    .title { font-size: 18px; font-weight: 600; margin: 0; }
-    .status { margin: 0; font-size: 14px; }
-    .out code { background: #f6f6f6; padding: 2px 6px; border-radius: 6px; }
+
+    .title {
+      font-size: 18px;
+      font-weight: 600;
+      margin: 0;
+    }
+
+    .status {
+      margin: 0;
+      font-size: 14px;
+      padding: 4px 8px;
+      border-radius: 6px;
+      width: fit-content;
+    }
+
+    .status.ok {
+      background: #c8f7c5;     /* grün */
+      color: #1b5e20;
+    }
+
+    .status.err {
+      background: #f8c7c7;     /* rot */
+      color: #7f0000;
+    }
+
+    .out code {
+      background: #f6f6f6;
+      padding: 2px 6px;
+      border-radius: 6px;
+    }
 
     .controls {
       display: grid;
@@ -84,12 +111,12 @@
   <div class="page">
     <div class="top">
       <p class="title">Web Teleop</p>
-      <p class="status" id="wsStatus">WebSocket: nicht verbunden</p>
+      <p class="status err" id="wsStatus">WebSocket: nicht verbunden</p>
       <p class="status out">Sende: <code id="out">v=0.00 m/s, w=0.00 rad/s</code></p>
     </div>
 
     <div class="controls">
-      <div class="joystick" id="joystick" aria-label="Touch Joystick">
+      <div class="joystick" id="joystick">
         <div class="center-dot"></div>
         <div class="stick" id="stick"></div>
       </div>
@@ -97,17 +124,27 @@
   </div>
 
 <script>
-  document.addEventListener("gesturestart", (e) => e.preventDefault(), { passive: false });
-  document.addEventListener("gesturechange", (e) => e.preventDefault(), { passive: false });
-  document.addEventListener("gestureend", (e) => e.preventDefault(), { passive: false });
+  document.addEventListener("gesturestart", e => e.preventDefault(), { passive: false });
+  document.addEventListener("gesturechange", e => e.preventDefault(), { passive: false });
+  document.addEventListener("gestureend", e => e.preventDefault(), { passive: false });
 
   // ---------- WebSocket ----------
   const wsStatus = document.getElementById("wsStatus");
   const outEl = document.getElementById("out");
 
   const ws = new WebSocket(`ws://${location.host}/ws`);
-  ws.onopen = () => wsStatus.textContent = "WebSocket: verbunden";
-  ws.onclose = () => wsStatus.textContent = "WebSocket: getrennt";
+
+  ws.onopen = () => {
+    wsStatus.textContent = "WebSocket: verbunden";
+    wsStatus.classList.remove("err");
+    wsStatus.classList.add("ok");
+  };
+
+  ws.onclose = () => {
+    wsStatus.textContent = "WebSocket: nicht verbunden";
+    wsStatus.classList.remove("ok");
+    wsStatus.classList.add("err");
+  };
 
   function send(v, w) {
     if (ws.readyState === WebSocket.OPEN) {
@@ -115,66 +152,67 @@
     }
   }
 
-  // ---------- Maximalwerte (so hoch wie möglich) ----------
-  // Hinweis: Diese Werte müssen trotzdem physikalisch/regelungstechnisch passen.
-  // Wenn dein base/kinematics_node intern begrenzt, wird dort gesättigt.
-  const V_MAX = 1.00; // m/s
-  const W_MAX = 3.00; // rad/s
+  // ---------- Maximalwerte ----------
+  const V_MAX = 1.0;   // m/s
+  const W_MAX = 3.0;   // rad/s
 
-  // ---------- Helpers ----------
+  const SPIN_WINDOW_DEG = 10.0;
+  const SPIN_WINDOW_RAD = SPIN_WINDOW_DEG * Math.PI / 180.0;
+
   function clamp(x, lo, hi) { return Math.max(lo, Math.min(hi, x)); }
 
-  // ---------- Joystick state ----------
+  function angleRad(x, y) { return Math.atan2(y, x); }
+
+  function absAngleDiff(a, b) {
+    let d = a - b;
+    while (d > Math.PI) d -= 2 * Math.PI;
+    while (d < -Math.PI) d += 2 * Math.PI;
+    return Math.abs(d);
+  }
+
+  // ---------- Joystick ----------
   const joy = document.getElementById("joystick");
   const stick = document.getElementById("stick");
 
   let active = false;
   let pointerId = null;
-
-  let jx = 0.0; // [-1..1], rechts positiv
-  let jy = 0.0; // [-1..1], hoch positiv
+  let jx = 0.0;
+  let jy = 0.0;
 
   function setStickVisual(nx, ny) {
-    const rect = joy.getBoundingClientRect();
-    const radius = rect.width * 0.5;
-    const maxTravel = radius * 0.55;
-
-    const px = nx * maxTravel;
-    const py = -ny * maxTravel;
-
-    stick.style.transform = `translate(${px}px, ${py}px) translate(-50%, -50%)`;
+    const r = joy.getBoundingClientRect().width * 0.5;
+    const m = r * 0.55;
+    stick.style.transform =
+      `translate(${nx * m}px, ${-ny * m}px) translate(-50%, -50%)`;
   }
 
   function resetJoystick() {
     jx = 0.0;
     jy = 0.0;
-    setStickVisual(0.0, 0.0);
+    setStickVisual(0, 0);
   }
 
-  function updateFromPointer(clientX, clientY) {
+  function updateFromPointer(x, y) {
     const rect = joy.getBoundingClientRect();
-    const cx = rect.left + rect.width * 0.5;
-    const cy = rect.top + rect.height * 0.5;
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
 
-    let dx = clientX - cx;
-    let dy = clientY - cy;
+    let dx = x - cx;
+    let dy = y - cy;
 
-    const radius = rect.width * 0.5;
-    const maxTravel = radius * 0.55;
-
-    const dist = Math.hypot(dx, dy);
-    if (dist > maxTravel && dist > 0) {
-      dx = dx * (maxTravel / dist);
-      dy = dy * (maxTravel / dist);
+    const m = rect.width * 0.5 * 0.55;
+    const d = Math.hypot(dx, dy);
+    if (d > m && d > 0) {
+      dx *= m / d;
+      dy *= m / d;
     }
 
-    jx = clamp(dx / maxTravel, -1.0, 1.0);
-    jy = clamp(-dy / maxTravel, -1.0, 1.0);
-
+    jx = clamp(dx / m, -1, 1);
+    jy = clamp(-dy / m, -1, 1);
     setStickVisual(jx, jy);
   }
 
-  joy.addEventListener("pointerdown", (e) => {
+  joy.addEventListener("pointerdown", e => {
     active = true;
     pointerId = e.pointerId;
     joy.setPointerCapture(pointerId);
@@ -182,7 +220,7 @@
     e.preventDefault();
   }, { passive: false });
 
-  joy.addEventListener("pointermove", (e) => {
+  joy.addEventListener("pointermove", e => {
     if (!active || e.pointerId !== pointerId) return;
     updateFromPointer(e.clientX, e.clientY);
     e.preventDefault();
@@ -193,43 +231,38 @@
     active = false;
     pointerId = null;
     resetJoystick();
-    send(0.0, 0.0);
+    send(0, 0);
     outEl.textContent = `v=0.00 m/s, w=0.00 rad/s`;
-    e.preventDefault();
   }
 
   joy.addEventListener("pointerup", endPointer, { passive: false });
   joy.addEventListener("pointercancel", endPointer, { passive: false });
-  joy.addEventListener("lostpointercapture", () => {
-    if (!active) return;
-    active = false;
-    pointerId = null;
-    resetJoystick();
-    send(0.0, 0.0);
-    outEl.textContent = `v=0.00 m/s, w=0.00 rad/s`;
-  });
+  joy.addEventListener("lostpointercapture", endPointer);
 
-  // ---------- Control loop (20 Hz) ----------
-  const PERIOD_MS = 50;
-
+  // ---------- Control loop ----------
   setInterval(() => {
-    // v hängt direkt von der Y-Position ab (hoch = +, runter = -)
-    const v = clamp(jy * V_MAX, -V_MAX, V_MAX);
-
-    // w hängt direkt von der X-Position ab (rechts = rechts drehen)
-    // Beim Rückwärtsfahren (jy < 0) links/rechts vertauschen:
-    const steerSign = (jy >= 0.0) ? 1.0 : -1.0;
-    const w = clamp(((-jx) * W_MAX) * steerSign, -W_MAX, W_MAX);
-
     if (!active) {
-      send(0.0, 0.0);
+      send(0, 0);
       outEl.textContent = `v=0.00 m/s, w=0.00 rad/s`;
       return;
     }
 
+    let v = clamp(jy * V_MAX, -V_MAX, V_MAX);
+
+    const steerSign = (jy >= 0) ? 1 : -1;
+    let w = clamp((-jx * W_MAX) * steerSign, -W_MAX, W_MAX);
+
+    const a = angleRad(jx, jy);
+    if (
+      absAngleDiff(a, 0) <= SPIN_WINDOW_RAD ||
+      absAngleDiff(a, Math.PI) <= SPIN_WINDOW_RAD
+    ) {
+      v = 0.0;
+    }
+
     send(v, w);
     outEl.textContent = `v=${v.toFixed(2)} m/s, w=${w.toFixed(2)} rad/s`;
-  }, PERIOD_MS);
+  }, 50);
 
   resetJoystick();
 </script>
