@@ -25,7 +25,7 @@
       width: 100%;
       display: grid;
       grid-template-rows: auto 1fr;
-      gap: 10px;
+      gap: 12px;
       padding: 14px;
       box-sizing: border-box;
     }
@@ -37,24 +37,13 @@
 
     .controls {
       display: grid;
-      gap: 12px;
       align-items: center;
       justify-items: center;
     }
 
-    .slider {
-      width: min(520px, 100%);
-      display: grid;
-      grid-template-columns: 140px 1fr 60px;
-      gap: 10px;
-      align-items: center;
-      font-size: 14px;
-    }
-    input[type="range"] { width: 100%; }
-
     .joystick {
-      width: min(78vw, 380px);
-      max-width: 380px;
+      width: min(86vw, 420px);
+      max-width: 420px;
       aspect-ratio: 1 / 1;
       border-radius: 999px;
       border: 2px solid #bbb;
@@ -100,18 +89,6 @@
     </div>
 
     <div class="controls">
-      <div class="slider">
-        <label for="vmax">Max v (m/s)</label>
-        <input id="vmax" type="range" min="0.05" max="1.00" step="0.05" value="0.25" />
-        <span id="vmaxVal">0.25</span>
-      </div>
-
-      <div class="slider">
-        <label for="wmax">Max w (rad/s)</label>
-        <input id="wmax" type="range" min="0.10" max="3.00" step="0.10" value="0.90" />
-        <span id="wmaxVal">0.90</span>
-      </div>
-
       <div class="joystick" id="joystick" aria-label="Touch Joystick">
         <div class="center-dot"></div>
         <div class="stick" id="stick"></div>
@@ -138,18 +115,11 @@
     }
   }
 
-  // ---------- UI ----------
-  const vmax = document.getElementById("vmax");
-  const wmax = document.getElementById("wmax");
-  const vmaxVal = document.getElementById("vmaxVal");
-  const wmaxVal = document.getElementById("wmaxVal");
-
-  function updateLabels() {
-    vmaxVal.textContent = Number(vmax.value).toFixed(2);
-    wmaxVal.textContent = Number(wmax.value).toFixed(2);
-  }
-  vmax.oninput = wmax.oninput = updateLabels;
-  updateLabels();
+  // ---------- Maximalwerte (so hoch wie möglich) ----------
+  // Hinweis: Diese Werte müssen trotzdem physikalisch/regelungstechnisch passen.
+  // Wenn dein base/kinematics_node intern begrenzt, wird dort gesättigt.
+  const V_MAX = 1.00; // m/s
+  const W_MAX = 3.00; // rad/s
 
   // ---------- Helpers ----------
   function clamp(x, lo, hi) { return Math.max(lo, Math.min(hi, x)); }
@@ -243,15 +213,13 @@
   const PERIOD_MS = 50;
 
   setInterval(() => {
-    const vMax = Number(vmax.value);
-    const wMax = Number(wmax.value);
+    // v hängt direkt von der Y-Position ab (hoch = +, runter = -)
+    const v = clamp(jy * V_MAX, -V_MAX, V_MAX);
 
-    // v: hoch = vorwärts, runter = rückwärts
-    const v = clamp(jy * vMax, -vMax, vMax);
-
-    // w: Stick rechts -> Roboter dreht rechts (um eigene Achse)
-    // (REP-103: +w ist links/CCW, daher negatives Vorzeichen für "rechts/CW")
-    const w = clamp((-jx) * wMax, -wMax, wMax);
+    // w hängt direkt von der X-Position ab (rechts = rechts drehen)
+    // Beim Rückwärtsfahren (jy < 0) links/rechts vertauschen:
+    const steerSign = (jy >= 0.0) ? 1.0 : -1.0;
+    const w = clamp(((-jx) * W_MAX) * steerSign, -W_MAX, W_MAX);
 
     if (!active) {
       send(0.0, 0.0);
