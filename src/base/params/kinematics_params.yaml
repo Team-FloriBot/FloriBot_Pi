@@ -3,9 +3,12 @@ kinematics_node:
     wheel_separation: 0.385
     wheel_radius: 0.100
 
-    ticks_per_rev: 2048.0
-    unwrap_modulo: true
-    modulo_ticks: 2048
+    # must match hardware_node ticks_per_rev (ticks per WHEEL revolution)
+    ticks_per_rev: 131000.0
+
+    # with continuous ticks from callbacks there is no modulo wrap anymore
+    unwrap_modulo: false
+    modulo_ticks: 131000
 
     cmd_vel_topic: "/cmd_vel"
     wheel_cmd_topic: "/wheel_commands"
