@@ -107,9 +107,6 @@ public:
       std::bind(&HardwareNode::onWheelCmd, this, std::placeholders::_1));
 
     ticks_pub_ = create_publisher<base::msg::WheelTicks4>(wheel_ticks_topic_, rclcpp::QoS(10));
-    // Helper topic for tuning/plotting (measured wheel speeds, left/right average)
-    meas_w_pub_ = create_publisher<base::msg::WheelVelocities>(
-      "/base/wheel_velocities_measured", rclcpp::QoS(10));
 
     initEncoders();
 
@@ -124,8 +121,8 @@ public:
     last_speed_eval_time_ = now();
 
     RCLCPP_INFO(get_logger(),
-      "hardware_node: dt=%.3f speed_tau=%.3f ticks_per_rev=%.1f | u_min=%.2f (apply|sp|>=%.2f) u_kick=%.2f kick_time=%.2f",
-      control_dt_, speed_tau_s_, ticks_per_rev_, u_min_, u_min_apply_radps_, u_kick_, kick_time_s_);
+      "hardware_node: dt=%.3f speed_window=%.3f ticks_per_rev=%.1f | u_ff_min=%.2f u_ff_w0=%.2f u_kick=%.2f kick_time=%.2f",
+      control_dt_, speed_window_s_, ticks_per_rev_, u_min_, u_ff_w0_radps_, u_kick_, kick_time_s_);
   }
 
   ~HardwareNode() override
@@ -168,23 +165,20 @@ private:
   double stop_eps_radps_{0.05};
 
   // Measurement filter
-  // Legacy parameter kept for compatibility with existing YAML.
-  // Used as an additional smoothing factor on top of the time-constant based filter.
   double meas_alpha_{0.25};
-  // Speed low-pass time constant (first order). Smaller -> faster, noisier.
-  // Implemented as alpha = dt / (tau + dt).
-  // Kept under the existing parameter name "speed_window_s" for compatibility.
-  double speed_tau_s_{0.10};
+  double speed_window_s_{0.10}; // seconds
   double meas_w_eps_{0.03};
 
   // Output slew
   double u_slew_rate_{1.0}; // 1/s, 0 disables
 
-  // Stiction compensation
-  double u_min_{0.18};              // minimum output when moving
-  double u_min_apply_radps_{0.35};  // apply u_min only above this |setpoint|
-  double u_kick_{0.0};              // optional start kick (additional)
-  double kick_time_s_{0.0};         // duration after sign change / start
+  // Friction compensation (smooth feedforward)
+  // u_min is kept for backward compatibility and used as feedforward amplitude.
+  double u_min_{0.18};               // feedforward amplitude (0..1)
+  double u_min_apply_radps_{0.0};    // apply feedforward only if |setpoint| >= this
+  double u_ff_w0_radps_{1.5};        // shaping (rad/s): larger -> slower rise
+  double u_kick_{0.0};               // optional start kick (additive)
+  double kick_time_s_{0.0};          // duration after direction change/start
 
   // I2C
   std::string i2c_dev_{"/dev/i2c-1"};
@@ -210,7 +204,6 @@ private:
   // ---------------- ROS ----------------
   rclcpp::Subscription<base::msg::WheelVelocities>::SharedPtr wheel_cmd_sub_;
   rclcpp::Publisher<base::msg::WheelTicks4>::SharedPtr ticks_pub_;
-  rclcpp::Publisher<base::msg::WheelVelocities>::SharedPtr meas_w_pub_;
   rclcpp::TimerBase::SharedPtr timer_;
   rclcpp::TimerBase::SharedPtr ticks_timer_;
 
@@ -253,17 +246,15 @@ private:
     declare_parameter<double>("setpoint_max_accel", setpoint_max_accel_);
     declare_parameter<double>("stop_eps_radps", stop_eps_radps_);
 
-    // speed estimator / filter
-    // speed_window_s is treated as filter time constant tau (s)
-    // meas_alpha is kept for backward compatibility (additional smoothing factor)
     declare_parameter<double>("meas_alpha", meas_alpha_);
     declare_parameter<double>("meas_w_eps", meas_w_eps_);
-    declare_parameter<double>("speed_window_s", speed_tau_s_);
+    declare_parameter<double>("speed_window_s", speed_window_s_);
 
     declare_parameter<double>("u_slew_rate", u_slew_rate_);
 
     declare_parameter<double>("u_min", u_min_);
     declare_parameter<double>("u_min_apply_radps", u_min_apply_radps_);
+    declare_parameter<double>("u_ff_w0_radps", u_ff_w0_radps_);
     declare_parameter<double>("u_kick", u_kick_);
     declare_parameter<double>("kick_time_s", kick_time_s_);
 
@@ -311,13 +302,17 @@ private:
     meas_alpha_ = clampDouble(get_parameter("meas_alpha").as_double(), 0.0, 1.0);
     meas_w_eps_ = get_parameter("meas_w_eps").as_double();
 
-    // parameter name kept: speed_window_s (interpreted as filter time constant tau)
-    speed_tau_s_ = std::max(0.0, get_parameter("speed_window_s").as_double());
+    speed_window_s_ = std::max(0.02, get_parameter("speed_window_s").as_double());
 
     u_slew_rate_ = get_parameter("u_slew_rate").as_double();
 
     u_min_ = clampDouble(get_parameter("u_min").as_double(), 0.0, 1.0);
-    u_min_apply_radps_ = std::max(0.0, get_parameter("u_min_apply_radps").as_double());
+    if (has_parameter("u_min_apply_radps")) {
+      u_min_apply_radps_ = std::max(0.0, get_parameter("u_min_apply_radps").as_double());
+    }
+    if (has_parameter("u_ff_w0_radps")) {
+      u_ff_w0_radps_ = std::max(1e-6, get_parameter("u_ff_w0_radps").as_double());
+    }
     u_kick_ = clampDouble(get_parameter("u_kick").as_double(), 0.0, 1.0);
     kick_time_s_ = std::max(0.0, get_parameter("kick_time_s").as_double());
 
@@ -430,13 +425,10 @@ private:
   {
     const rclcpp::Time t = now();
     const double dt = (t - last_speed_eval_time_).seconds();
-    if (dt <= 0.0) return;
 
-    // First-order low-pass: alpha = dt/(tau+dt)
-    const double tau = std::max(0.0, speed_tau_s_);
-    const double alpha_tau = (tau <= 0.0) ? 1.0 : clampDouble(dt / (tau + dt), 0.0, 1.0);
-    // combine with legacy alpha (acts as additional de-noising without introducing a ZOH delay)
-    const double alpha = clampDouble(alpha_tau + (1.0 - alpha_tau) * meas_alpha_, 0.0, 1.0);
+    if (dt < speed_window_s_) {
+      return;
+    }
 
     const double k = (2.0 * M_PI) / ticks_per_rev_;
 
@@ -448,7 +440,7 @@ private:
       double w = (static_cast<double>(d) * k) / dt; // rad/s
 
       if (std::abs(w) < meas_w_eps_) w = 0.0;
-      meas_w_filt_[i] = alpha * w + (1.0 - alpha) * meas_w_filt_[i];
+      meas_w_filt_[i] = meas_alpha_ * w + (1.0 - meas_alpha_) * meas_w_filt_[i];
     }
 
     last_speed_eval_time_ = t;
@@ -479,12 +471,40 @@ private:
         last_dir_[i] = dir;
       }
 
-      double u = pid_[i]->compute(sp, meas_w_filt_[i], control_dt_);
+      // --- friction feedforward (smooth) + feedback ---
+      // Preview feedback to detect slew limiting without advancing controller state.
+      const double u_fb_preview = pid_[i]->compute(sp, meas_w_filt_[i], control_dt_, false, false);
 
-      // stiction compensation: enforce minimum output when moving
-      if (dir != 0 && std::abs(sp) >= u_min_apply_radps_) {
-        if (std::abs(u) < u_min_) u = static_cast<double>(dir) * u_min_;
+      double u_ff = 0.0;
+      if (dir != 0) {
+        if (std::abs(sp) >= u_min_apply_radps_) {
+          const double s = std::abs(sp);
+          // smooth rise: 0 .. u_min_ as |sp| increases
+          u_ff = static_cast<double>(dir) * u_min_ * (1.0 - std::exp(-s / u_ff_w0_radps_));
+        }
       }
+
+      // include kick in preview (it is additive and independent of PID state)
+      double u_preview = u_fb_preview + u_ff;
+      if (u_kick_ > 0.0 && kick_time_s_ > 0.0) {
+        if (t < kick_until_[i]) {
+          u_preview = clampDouble(u_preview + static_cast<double>(dir) * u_kick_, -output_limit_, output_limit_);
+        }
+      }
+
+      // determine whether slew limiting will clip the command
+      bool slew_limited = false;
+      if (u_slew_rate_ > 0.0) {
+        const double du_max = u_slew_rate_ * control_dt_;
+        const double u_limited = clampDouble(u_preview, u_last_[i] - du_max, u_last_[i] + du_max);
+        slew_limited = (std::abs(u_limited - u_preview) > 1e-12);
+      }
+
+      // now compute feedback with correct integrator handling (freeze if slew-limited)
+      const double u_fb = pid_[i]->compute(sp, meas_w_filt_[i], control_dt_, slew_limited, true);
+
+      double u = u_fb + u_ff;
+      u = clampDouble(u, -output_limit_, output_limit_);
 
       // optional start kick (additive)
       if (u_kick_ > 0.0 && kick_time_s_ > 0.0) {
@@ -502,12 +522,6 @@ private:
       u_last_[i] = u;
       writeMotor(i, u);
     }
-
-    // publish measured speed (left/right average) for plotting/tuning
-    base::msg::WheelVelocities m;
-    m.left = 0.5 * (meas_w_filt_[FL] + meas_w_filt_[RL]);
-    m.right = 0.5 * (meas_w_filt_[FR] + meas_w_filt_[RR]);
-    meas_w_pub_->publish(m);
   }
 
   // ---------------- Publish ticks ----------------
