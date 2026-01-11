@@ -22,12 +22,7 @@
 #include "base/msg/wheel_ticks4.hpp"
 #include "base/pid_controller.h"
 
-// ============================================================
-// NXT Servo Controller I2C writer (FloriBot Pi style)
-// - I2C dev: /dev/i2c-1
-// - 7-bit addr: 0x58 (decimal 88)
-// - Pulse write: reg = channel*2 + 66, then write [reg, low, high]
-// ============================================================
+// ---------------- I2C NXT Servo ----------------
 class NxtServoI2C
 {
 public:
@@ -71,6 +66,7 @@ private:
   int fd_{-1};
 };
 
+// ---------------- helpers ----------------
 static bool getJointPosition(const sensor_msgs::msg::JointState& js, const std::string& name, double& pos_out)
 {
   auto it = std::find(js.name.begin(), js.name.end(), name);
@@ -83,13 +79,36 @@ static bool getJointPosition(const sensor_msgs::msg::JointState& js, const std::
   return true;
 }
 
-// encodertest behavior: JointState.position already encodes "ticks"
-static int64_t toTicks(double pos, bool invert)
+static inline bool isZeroStamp(const builtin_interfaces::msg::Time& t)
+{
+  return (t.sec == 0) && (t.nanosec == 0);
+}
+
+static int64_t posToRawTicks(double pos, bool invert)
 {
   const int64_t t = static_cast<int64_t>(std::llround(pos));
   return invert ? -t : t;
 }
 
+// unwrap delta for modulo encoder (0..N..0)
+static int64_t deltaModulo(int64_t cur, int64_t last, int64_t mod)
+{
+  int64_t d = cur - last;
+  const int64_t half = mod / 2;
+  if (d >  half) d -= mod;
+  if (d < -half) d += mod;
+  return d;
+}
+
+// clamp helper
+static double clampAbs(double v, double lim)
+{
+  if (v > lim) return lim;
+  if (v < -lim) return -lim;
+  return v;
+}
+
+// ---------------- Node ----------------
 class HardwareNode : public rclcpp::Node
 {
 public:
@@ -106,7 +125,7 @@ public:
       std::bind(&HardwareNode::onWheelCmd, this, std::placeholders::_1));
 
     joint_states_sub_ = create_subscription<sensor_msgs::msg::JointState>(
-      joint_states_topic_, rclcpp::QoS(10),
+      joint_states_topic_, rclcpp::QoS(50),
       std::bind(&HardwareNode::jointStatesCallback, this, std::placeholders::_1));
 
     ticks_pub_ = create_publisher<base::msg::WheelTicks4>(wheel_ticks_topic_, rclcpp::QoS(10));
@@ -116,13 +135,13 @@ public:
       std::bind(&HardwareNode::controlLoop, this));
 
     RCLCPP_INFO(get_logger(),
-      "hardware_node: I2C dev=%s addr=%d, joint_states=%s, wheel_cmd=%s",
-      i2c_dev_.c_str(), i2c_addr_, joint_states_topic_.c_str(), wheel_cmd_topic_.c_str());
+      "hardware_node: dt=%.3f tpr=%.1f modulo=%d unwrap=%d js_timeout=%.3f meas_alpha=%.3f max_radps=%.2f",
+      control_dt_, ticks_per_rev_, modulo_ticks_, (int)unwrap_enabled_,
+      jointstate_timeout_s_, meas_alpha_, max_meas_radps_);
   }
 
   ~HardwareNode() override
   {
-    // go neutral on shutdown
     for (int i = 0; i < WHEEL_COUNT; ++i) {
       try { writeMotor(i, 0.0); } catch (...) {}
     }
@@ -132,47 +151,58 @@ public:
 private:
   enum WheelIndex { FL = 0, FR = 1, RL = 2, RR = 3, WHEEL_COUNT = 4 };
 
-  // ---- ROS params ----
+  // Topics
   std::string wheel_cmd_topic_{"/wheel_commands"};
   std::string wheel_ticks_topic_{"/base/wheel_ticks4"};
   std::string ticks_frame_id_{"base_link"};
 
+  // Control timing
   double control_dt_{0.02};
-  double ticks_per_rev_{2048.0};
+
+  // Encoder scaling
+  double ticks_per_rev_{2048.0};   // effective ticks per wheel revolution (for rad conversion)
+  int modulo_ticks_{2048};         // wrap period of raw ticks from encoder (can differ!)
+  bool unwrap_enabled_{true};
+
+  double jointstate_timeout_s_{0.20}; // if no JS update -> stop (safety)
 
   // PID
-  double kp_{0.2};
-  double ki_{0.0};
+  double kp_{0.12};
+  double ki_{0.25};
   double kd_{0.0};
   double output_limit_{1.0};
-  double deadband_{0.08};
-  double setpoint_max_accel_{std::numeric_limits<double>::infinity()};
+  double deadband_{0.10};
+  double setpoint_max_accel_{6.0};
 
-  // Anti-jitter / standstill handling
-  double stop_eps_radps_{0.03};  // if |setpoint| < stop_eps -> neutral + reset PID
-  double meas_w_eps_{0.05};      // if |measured| < meas_w_eps -> treat as 0
+  double stop_eps_radps_{0.05};
 
-  // Encoder via /joint_states
+  // Measurement filtering + sanity
+  double meas_alpha_{0.30};        // LPF alpha for measured w
+  double max_meas_radps_{30.0};    // reject insane speeds (rad/s)
+  int64_t max_tick_jump_{800};     // reject encoder glitches per JS update (ticks)
+
+  // Optional output slew limiting
+  double u_slew_rate_{3.0};        // 1/s, 0 disables
+
+  // joint mapping
   std::string joint_states_topic_{"/joint_states"};
   std::string fl_joint_{"joint2"};
   std::string fr_joint_{"joint3"};
   std::string rl_joint_{"joint0"};
   std::string rr_joint_{"joint1"};
 
-  bool invert_fl_{false};
+  // IMPORTANT: per your info FL+RL must be inverted
+  bool invert_fl_{true};
   bool invert_fr_{false};
-  bool invert_rl_{false};
+  bool invert_rl_{true};
   bool invert_rr_{false};
 
-  bool have_joint_state_{false};
-  rclcpp::Time last_joint_stamp_;
-
-  // Motor (I2C Pi mapping)
+  // Motor I2C
   std::string i2c_dev_{"/dev/i2c-1"};
   int i2c_addr_{0x58};
 
-  std::array<int, 4> wheel_channels_{{2, 3, 0, 1}};            // [FL, FR, RL, RR]
-  std::array<double, 4> wheel_gains_{{1.0, 1.0, 1.0, 1.0}};    // polarity per wheel
+  std::array<int, 4> wheel_channels_{{2, 3, 0, 1}};         // [FL, FR, RL, RR]
+  std::array<double, 4> wheel_gains_{{1.0, 1.0, 1.0, 1.0}}; // polarity per wheel (separately from invert_*)
 
   double k_us_per_pct_{5.5};
   int neutral_us_{1480};
@@ -187,15 +217,26 @@ private:
   rclcpp::Publisher<base::msg::WheelTicks4>::SharedPtr ticks_pub_;
   rclcpp::TimerBase::SharedPtr timer_;
 
-  // Controllers
+  // PID
   std::array<std::unique_ptr<base::PIDController>, WHEEL_COUNT> pid_{};
 
-  // targets (rad/s)
+  // setpoints (rad/s)
   double target_w_radps_[WHEEL_COUNT]{0.0, 0.0, 0.0, 0.0};
 
-  // encoder ticks (absolute)
-  std::atomic<int64_t> ticks_[WHEEL_COUNT]{0, 0, 0, 0};
-  int64_t ticks_last_[WHEEL_COUNT]{0, 0, 0, 0};
+  // raw tick state
+  int64_t raw_last_[WHEEL_COUNT]{0, 0, 0, 0};
+  bool raw_valid_[WHEEL_COUNT]{false, false, false, false};
+
+  // continuous ticks (published)
+  std::atomic<int64_t> ticks_cont_[WHEEL_COUNT]{0, 0, 0, 0};
+
+  // measured speed state (computed ONLY in jointStatesCallback)
+  double meas_w_filt_[WHEEL_COUNT]{0.0, 0.0, 0.0, 0.0};
+  rclcpp::Time last_js_stamp_;
+  bool have_js_{false};
+
+  // output state
+  double u_last_[WHEEL_COUNT]{0.0, 0.0, 0.0, 0.0};
 
   NxtServoI2C nxt_;
 
@@ -206,7 +247,12 @@ private:
     declare_parameter<std::string>("ticks_frame_id", ticks_frame_id_);
 
     declare_parameter<double>("control_dt", control_dt_);
+
     declare_parameter<double>("ticks_per_rev", ticks_per_rev_);
+    declare_parameter<int>("modulo_ticks", modulo_ticks_);
+    declare_parameter<bool>("unwrap_enabled", unwrap_enabled_);
+
+    declare_parameter<double>("jointstate_timeout_s", jointstate_timeout_s_);
 
     declare_parameter<double>("kp", kp_);
     declare_parameter<double>("ki", ki_);
@@ -214,9 +260,13 @@ private:
     declare_parameter<double>("output_limit", output_limit_);
     declare_parameter<double>("deadband", deadband_);
     declare_parameter<double>("setpoint_max_accel", setpoint_max_accel_);
-
     declare_parameter<double>("stop_eps_radps", stop_eps_radps_);
-    declare_parameter<double>("meas_w_eps", meas_w_eps_);
+
+    declare_parameter<double>("meas_alpha", meas_alpha_);
+    declare_parameter<double>("max_meas_radps", max_meas_radps_);
+    declare_parameter<int>("max_tick_jump", static_cast<int>(max_tick_jump_));
+
+    declare_parameter<double>("u_slew_rate", u_slew_rate_);
 
     declare_parameter<std::string>("joint_states_topic", joint_states_topic_);
     declare_parameter<std::string>("fl_joint", fl_joint_);
@@ -255,19 +305,27 @@ private:
     wheel_ticks_topic_ = get_parameter("wheel_ticks_topic").as_string();
     ticks_frame_id_    = get_parameter("ticks_frame_id").as_string();
 
-    control_dt_    = get_parameter("control_dt").as_double();
+    control_dt_ = get_parameter("control_dt").as_double();
+
     ticks_per_rev_ = get_parameter("ticks_per_rev").as_double();
+    modulo_ticks_  = get_parameter("modulo_ticks").as_int();
+    unwrap_enabled_ = get_parameter("unwrap_enabled").as_bool();
+
+    jointstate_timeout_s_ = get_parameter("jointstate_timeout_s").as_double();
 
     kp_ = get_parameter("kp").as_double();
     ki_ = get_parameter("ki").as_double();
     kd_ = get_parameter("kd").as_double();
-
     output_limit_ = get_parameter("output_limit").as_double();
-    deadband_     = get_parameter("deadband").as_double();
+    deadband_ = get_parameter("deadband").as_double();
     setpoint_max_accel_ = get_parameter("setpoint_max_accel").as_double();
-
     stop_eps_radps_ = get_parameter("stop_eps_radps").as_double();
-    meas_w_eps_     = get_parameter("meas_w_eps").as_double();
+
+    meas_alpha_ = std::clamp(get_parameter("meas_alpha").as_double(), 0.0, 1.0);
+    max_meas_radps_ = get_parameter("max_meas_radps").as_double();
+    max_tick_jump_ = static_cast<int64_t>(get_parameter("max_tick_jump").as_int());
+
+    u_slew_rate_ = get_parameter("u_slew_rate").as_double();
 
     joint_states_topic_ = get_parameter("joint_states_topic").as_string();
     fl_joint_ = get_parameter("fl_joint").as_string();
@@ -280,22 +338,17 @@ private:
     invert_rl_ = get_parameter("invert_rl").as_bool();
     invert_rr_ = get_parameter("invert_rr").as_bool();
 
-    i2c_dev_  = get_parameter("i2c_dev").as_string();
+    i2c_dev_ = get_parameter("i2c_dev").as_string();
     i2c_addr_ = get_parameter("i2c_addr").as_int();
 
     {
       auto ch = get_parameter("wheel_channels").as_integer_array();
-      if (ch.size() != 4) {
-        throw std::runtime_error("wheel_channels must have length 4 (order: [FL, FR, RL, RR])");
-      }
+      if (ch.size() != 4) throw std::runtime_error("wheel_channels must have length 4");
       for (int i = 0; i < 4; ++i) wheel_channels_[i] = static_cast<int>(ch[i]);
     }
-
     {
       auto g = get_parameter("wheel_gains").as_double_array();
-      if (g.size() != 4) {
-        throw std::runtime_error("wheel_gains must have length 4 (order: [FL, FR, RL, RR])");
-      }
+      if (g.size() != 4) throw std::runtime_error("wheel_gains must have length 4");
       for (int i = 0; i < 4; ++i) wheel_gains_[i] = g[i];
     }
 
@@ -306,6 +359,10 @@ private:
     pct_min_      = get_parameter("pct_min").as_int();
     pct_max_      = get_parameter("pct_max").as_int();
 
+    if (ticks_per_rev_ <= 0.0) throw std::runtime_error("ticks_per_rev must be > 0");
+    if (modulo_ticks_ <= 0) modulo_ticks_ = static_cast<int>(std::llround(ticks_per_rev_));
+    if (modulo_ticks_ <= 0) modulo_ticks_ = 1;
+
     for (int i = 0; i < WHEEL_COUNT; ++i) {
       pid_[i] = std::make_unique<base::PIDController>(
         kp_, ki_, kd_,
@@ -314,6 +371,8 @@ private:
         setpoint_max_accel_
       );
       pid_[i]->reset();
+      meas_w_filt_[i] = 0.0;
+      u_last_[i] = 0.0;
     }
   }
 
@@ -332,78 +391,125 @@ private:
     const bool ok_fr = getJointPosition(*msg, fr_joint_, pfr);
     const bool ok_rl = getJointPosition(*msg, rl_joint_, prl);
     const bool ok_rr = getJointPosition(*msg, rr_joint_, prr);
+    if (!(ok_fl && ok_fr && ok_rl && ok_rr)) return;
 
-    if (!(ok_fl && ok_fr && ok_rl && ok_rr)) {
-      RCLCPP_WARN_THROTTLE(
-        get_logger(), *get_clock(), 2000,
-        "joint_states missing mapping: FL(%s)=%d FR(%s)=%d RL(%s)=%d RR(%s)=%d",
-        fl_joint_.c_str(), (int)ok_fl,
-        fr_joint_.c_str(), (int)ok_fr,
-        rl_joint_.c_str(), (int)ok_rl,
-        rr_joint_.c_str(), (int)ok_rr
-      );
+    const int64_t raw[WHEEL_COUNT] = {
+      posToRawTicks(pfl, invert_fl_),
+      posToRawTicks(pfr, invert_fr_),
+      posToRawTicks(prl, invert_rl_),
+      posToRawTicks(prr, invert_rr_)
+    };
+
+    const rclcpp::Time stamp = isZeroStamp(msg->header.stamp) ? now() : rclcpp::Time(msg->header.stamp);
+
+    if (!have_js_) {
+      // init baseline
+      for (int i = 0; i < WHEEL_COUNT; ++i) {
+        raw_last_[i] = raw[i];
+        raw_valid_[i] = true;
+      }
+      last_js_stamp_ = stamp;
+      have_js_ = true;
       return;
     }
 
-    ticks_[FL].store(toTicks(pfl, invert_fl_), std::memory_order_relaxed);
-    ticks_[FR].store(toTicks(pfr, invert_fr_), std::memory_order_relaxed);
-    ticks_[RL].store(toTicks(prl, invert_rl_), std::memory_order_relaxed);
-    ticks_[RR].store(toTicks(prr, invert_rr_), std::memory_order_relaxed);
+    const double dt = (stamp - last_js_stamp_).seconds();
+    if (!(dt > 0.0) || dt > 1.0) {
+      // ignore insane dt
+      last_js_stamp_ = stamp;
+      for (int i = 0; i < WHEEL_COUNT; ++i) raw_last_[i] = raw[i];
+      return;
+    }
 
-    rclcpp::Time stamp(msg->header.stamp);
-    last_joint_stamp_ = (stamp.nanoseconds() != 0) ? stamp : now();
-    have_joint_state_ = true;
+    // compute dticks from this JS update (and unwrap)
+    int64_t dticks[WHEEL_COUNT]{0,0,0,0};
+    for (int i = 0; i < WHEEL_COUNT; ++i) {
+      if (!raw_valid_[i]) {
+        raw_last_[i] = raw[i];
+        raw_valid_[i] = true;
+        dticks[i] = 0;
+        continue;
+      }
+
+      int64_t d = raw[i] - raw_last_[i];
+      if (unwrap_enabled_) {
+        d = deltaModulo(raw[i], raw_last_[i], modulo_ticks_);
+      }
+      raw_last_[i] = raw[i];
+
+      // glitch rejection (USB spikes / lost packets)
+      if (std::llabs(d) > max_tick_jump_) {
+        d = 0;
+      }
+
+      dticks[i] = d;
+
+      // accumulate continuous ticks for publishing
+      ticks_cont_[i].store(ticks_cont_[i].load(std::memory_order_relaxed) + d, std::memory_order_relaxed);
+    }
+
+    // ticks -> rad/s using dt from JS packets (NOT control_dt)
+    const double k = (2.0 * M_PI) / ticks_per_rev_;
+    for (int i = 0; i < WHEEL_COUNT; ++i) {
+      double w = (static_cast<double>(dticks[i]) * k) / dt;   // rad/s
+      w = clampAbs(w, max_meas_radps_);
+      meas_w_filt_[i] = meas_alpha_ * w + (1.0 - meas_alpha_) * meas_w_filt_[i];
+    }
+
+    last_js_stamp_ = stamp;
   }
 
   void controlLoop()
   {
-    // compute measured speed from tick delta
-    double meas_w_radps[WHEEL_COUNT]{0.0, 0.0, 0.0, 0.0};
+    const rclcpp::Time tnow = now();
 
-    for (int i = 0; i < WHEEL_COUNT; ++i) {
-      const int64_t t = ticks_[i].load(std::memory_order_relaxed);
-      const int64_t dticks = t - ticks_last_[i];
-      ticks_last_[i] = t;
-
-      const double rev = static_cast<double>(dticks) / ticks_per_rev_;
-      const double rad = rev * 2.0 * M_PI;
-      meas_w_radps[i] = rad / control_dt_;
-
-      if (std::abs(meas_w_radps[i]) < meas_w_eps_) {
-        meas_w_radps[i] = 0.0;
+    // If no fresh JS -> stop (otherwise PID goes crazy on stale measurement)
+    if (!have_js_ || (tnow - last_js_stamp_).seconds() > jointstate_timeout_s_) {
+      for (int i = 0; i < WHEEL_COUNT; ++i) {
+        pid_[i]->reset();
+        u_last_[i] = 0.0;
+        writeMotor(i, 0.0);
       }
+      publishTicks(tnow);
+      return;
     }
 
-    // closed-loop per wheel with standstill hold
     for (int i = 0; i < WHEEL_COUNT; ++i) {
       const double sp = target_w_radps_[i];
 
-      // If no encoder feedback yet: keep neutral and reset integrator state
-      if (!have_joint_state_) {
-        pid_[i]->reset();
-        writeMotor(i, 0.0);
-        continue;
-      }
-
-      // Standstill anti-jitter: disable control near zero setpoint
       if (std::abs(sp) < stop_eps_radps_) {
         pid_[i]->reset();
+        u_last_[i] = 0.0;
         writeMotor(i, 0.0);
         continue;
       }
 
-      const double u = pid_[i]->compute(sp, meas_w_radps[i], control_dt_);
+      // measured speed comes from jointStatesCallback (filtered)
+      const double meas = meas_w_filt_[i];
+
+      double u = pid_[i]->compute(sp, meas, control_dt_);
+
+      if (u_slew_rate_ > 0.0) {
+        const double du_max = u_slew_rate_ * control_dt_;
+        u = std::clamp(u, u_last_[i] - du_max, u_last_[i] + du_max);
+      }
+      u_last_[i] = u;
+
       writeMotor(i, u);
     }
 
-    // publish ticks always (so you can debug even if have_joint_state_ is false)
+    publishTicks(tnow);
+  }
+
+  void publishTicks(const rclcpp::Time& stamp)
+  {
     base::msg::WheelTicks4 out;
-    out.header.stamp = have_joint_state_ ? last_joint_stamp_ : now();
+    out.header.stamp = stamp;
     out.header.frame_id = ticks_frame_id_;
-    out.fl_ticks = ticks_[FL].load(std::memory_order_relaxed);
-    out.fr_ticks = ticks_[FR].load(std::memory_order_relaxed);
-    out.rl_ticks = ticks_[RL].load(std::memory_order_relaxed);
-    out.rr_ticks = ticks_[RR].load(std::memory_order_relaxed);
+    out.fl_ticks = ticks_cont_[FL].load(std::memory_order_relaxed);
+    out.fr_ticks = ticks_cont_[FR].load(std::memory_order_relaxed);
+    out.rl_ticks = ticks_cont_[RL].load(std::memory_order_relaxed);
+    out.rr_ticks = ticks_cont_[RR].load(std::memory_order_relaxed);
     ticks_pub_->publish(out);
   }
 
