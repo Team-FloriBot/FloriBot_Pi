@@ -340,40 +340,41 @@ private:
     have_joint_state_ = true;
   }
 
-  void controlLoop()
-  {
-    if (!have_joint_state_) {
-      // no encoder feedback yet -> hold neutral
-      for (int i = 0; i < WHEEL_COUNT; ++i) writeMotor(i, 0.0);
-      return;
-    }
+void controlLoop()
+{
+  // measured wheel speed from tick delta
+  double meas_w_radps[WHEEL_COUNT]{0.0, 0.0, 0.0, 0.0};
 
-    double meas_w_radps[WHEEL_COUNT]{0.0, 0.0, 0.0, 0.0};
+  for (int i = 0; i < WHEEL_COUNT; ++i) {
+    const int64_t t = ticks_[i].load(std::memory_order_relaxed);
+    const int64_t dticks = t - ticks_last_[i];
+    ticks_last_[i] = t;
 
-    for (int i = 0; i < WHEEL_COUNT; ++i) {
-      const int64_t t = ticks_[i].load(std::memory_order_relaxed);
-      const int64_t dticks = t - ticks_last_[i];
-      ticks_last_[i] = t;
+    const double rev = static_cast<double>(dticks) / ticks_per_rev_;
+    const double rad = rev * 2.0 * M_PI;
+    meas_w_radps[i] = rad / control_dt_;
+  }
 
-      const double rev = static_cast<double>(dticks) / ticks_per_rev_;
-      const double rad = rev * 2.0 * M_PI;
-      meas_w_radps[i] = rad / control_dt_;
-    }
-
+  // If no encoder feedback yet: hold neutral (no movement)
+  if (!have_joint_state_) {
+    for (int i = 0; i < WHEEL_COUNT; ++i) writeMotor(i, 0.0);
+  } else {
     for (int i = 0; i < WHEEL_COUNT; ++i) {
       const double u = pid_[i]->compute(target_w_radps_[i], meas_w_radps[i], control_dt_);
       writeMotor(i, u);
     }
-
-    base::msg::WheelTicks4 out;
-    out.header.stamp = last_joint_stamp_;
-    out.header.frame_id = ticks_frame_id_;
-    out.fl_ticks = ticks_[FL].load(std::memory_order_relaxed);
-    out.fr_ticks = ticks_[FR].load(std::memory_order_relaxed);
-    out.rl_ticks = ticks_[RL].load(std::memory_order_relaxed);
-    out.rr_ticks = ticks_[RR].load(std::memory_order_relaxed);
-    ticks_pub_->publish(out);
   }
+
+  base::msg::WheelTicks4 out;
+  out.header.stamp = have_joint_state_ ? last_joint_stamp_ : now();
+  out.header.frame_id = ticks_frame_id_;
+  out.fl_ticks = ticks_[FL].load(std::memory_order_relaxed);
+  out.fr_ticks = ticks_[FR].load(std::memory_order_relaxed);
+  out.rl_ticks = ticks_[RL].load(std::memory_order_relaxed);
+  out.rr_ticks = ticks_[RR].load(std::memory_order_relaxed);
+  ticks_pub_->publish(out);
+}
+
 
   void writeMotor(int wheel, double u_norm)
   {
