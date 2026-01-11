@@ -6,26 +6,31 @@ hardware_node:
 
     control_dt: 0.02
 
-    # Phidget counts quadrature as 4x:
-    # 500 CPR * 4 = 2000 ticks / motor rev
-    # gear ratio 65.5:1 => 2000 * 65.5 = 131000 ticks / wheel rev
+    # Phidget: 500 CPR * 4 * 65.5 = 131000 ticks / wheel rev
     ticks_per_rev: 131000.0
 
-    # PID
-    kp: 0.12
-    ki: 0.25
+    # PID (Startwerte "anti-ruckeln" für low-speed)
+    kp: 0.08
+    ki: 0.35
     kd: 0.0
+
     output_limit: 1.0
-    deadband: 0.10
-    setpoint_max_accel: 6.0
+
+    # etwas größer, um PWM/Mechanik-Totzone nicht ständig zu "flippen"
+    deadband: 0.12
+
+    # limit setpoint ramp (rad/s^2): zu hoch => ruckeln beim Anfahren
+    setpoint_max_accel: 2.0
+
+    # stop threshold (rad/s)
     stop_eps_radps: 0.05
 
-    # Measurement filtering
-    meas_alpha: 0.30
+    # Messwertfilter (0..1): kleiner => stärker glätten
+    meas_alpha: 0.25
     meas_w_eps: 0.05
 
-    # Output smoothing
-    u_slew_rate: 3.0
+    # Ausgangsänderung begrenzen (0 disables). kleiner => weicheres Anfahren
+    u_slew_rate: 1.5
 
     # I2C
     i2c_dev: "/dev/i2c-1"
@@ -43,13 +48,10 @@ hardware_node:
     pct_max: 100
 
     # Phidget HighSpeed Encoder 1047
-    # serial -1 = any
     phidget_serial: -1
-
-    # [FL, FR, RL, RR] phidget channels
     encoder_channels: [2, 3, 0, 1]
 
-    # Inverts: FL und RL invertiert
+    # FL + RL invertiert
     invert_fl: true
     invert_fr: false
     invert_rl: true
