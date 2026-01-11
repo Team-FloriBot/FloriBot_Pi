@@ -33,9 +33,14 @@ private:
   // Params
   double wheel_sep_{0.385};         // [m]
   double wheel_rad_{0.100};         // [m]
-  double ticks_per_rev_{2048.0};    // effective ticks per wheel revolution
-  bool unwrap_modulo_{true};
-  int modulo_ticks_{2048};
+
+  // Phidget 4x quadrature + gear: 500 CPR * 4 * 65.5 = 131000 ticks / wheel rev
+  double ticks_per_rev_{131000.0};
+
+  // With continuous ticks (callback accumulated) no wrap needed
+  bool unwrap_modulo_{false};
+  int modulo_ticks_{131000};
+
   bool publish_tf_{true};
 
   std::string cmd_vel_topic_{"/cmd_vel"};
@@ -46,16 +51,13 @@ private:
   std::string odom_frame_id_{"odom"};
   std::string base_frame_id_{"base_link"};
 
-  // Pub/Sub
+  // ROS interface
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr sub_cmd_vel_;
   rclcpp::Subscription<base::msg::WheelTicks4>::SharedPtr sub_ticks_;
-
   rclcpp::Publisher<base::msg::WheelVelocities>::SharedPtr pub_wheel_cmd_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pub_odom_;
 
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
-
-  // Library
   std::unique_ptr<KinematicsCalculator> kinematics_;
 
   // Odom state
