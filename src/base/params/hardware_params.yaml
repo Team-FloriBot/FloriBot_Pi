@@ -7,31 +7,28 @@ hardware_node:
     control_dt: 0.02
     ticks_per_rev: 131000.0
 
-    # PID: weniger I für Kriechfahrt
     kp: 0.05
     ki: 0.25
     kd: 0.0
     output_limit: 1.0
     deadband: 0.10
-    setpoint_max_accel: 1.2
 
-    # größerer Stop-Schwellwert -> sauberer Stillstand (weniger "Nachschieben")
+    # steilere Anfahrrampe (Sollwert-Rampe)
+    setpoint_max_accel: 4.0
     stop_eps_radps: 0.10
 
     meas_alpha: 0.20
     meas_w_eps: 0.03
 
     speed_window_s: 0.15
-    u_slew_rate: 0.8
 
-    # Stiction compensation
+    # steilerer Stellgrößenanstieg
+    u_slew_rate: 2.0
+
+    # stiction compensation
     u_min: 0.20
     u_kick: 0.00
     kick_time_s: 0.00
-
-    # WICHTIG: u_min erst ab "echter Fahrt" anwenden (sonst kriechendes Pumpen)
-    # (diesen Parameter musst du im Code einmal auswerten – wenn er noch nicht existiert, sag Bescheid,
-    # dann gebe ich dir die komplette hardware_node.cpp mit der kleinen Ergänzung)
     u_min_apply_radps: 0.35
 
     i2c_dev: "/dev/i2c-1"
