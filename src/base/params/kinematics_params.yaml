@@ -1,13 +1,13 @@
 kinematics_node:
   ros__parameters:
-    # Translation neu kalibriert:
-    # real: 2.279 m
-    # odom: 2.099990087 m
-    # Faktor = 1.08527
-    # 0.09688 -> 0.10514
-    wheel_radius: 0.1051
+    # Translation-Korrektur:
+    # real: 1.90 m
+    # odom: 2.0269994787835475 m
+    # Faktor = 0.937346
+    # 0.1051 -> 0.09852
+    wheel_radius: 0.09852
 
-    # Rotation separat kalibrieren!
+    # Rotation separat kalibriert lassen (unverändert)
     wheel_separation: 0.8041
 
     ticks_per_rev: 131000.0
