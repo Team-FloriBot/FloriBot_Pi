@@ -4,7 +4,20 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
   <title>FloriBot Web Teleop (Touch Joystick)</title>
+
   <style>
+    /* ---- Mobile Touch Fixes ---- */
+    * {
+      -webkit-user-select: none;          /* iOS Safari: keine Textmarkierung */
+      -webkit-touch-callout: none;        /* iOS: kein Kontextmenü */
+      -webkit-tap-highlight-color: transparent;
+      user-select: none;
+      touch-action: manipulation;         /* generell: kein Doppeltap-Zoom etc. */
+    }
+    html, body {
+      overscroll-behavior: none;
+    }
+
     body { font-family: sans-serif; margin: 20px; }
     .wrap { max-width: 720px; }
     .card {
@@ -32,8 +45,10 @@
       border: 2px solid #bbb;
       background: radial-gradient(circle at 30% 30%, #fafafa, #eaeaea);
       position: relative;
-      touch-action: none; /* wichtig für Pointer Events + kein Scroll */
+
+      touch-action: none;   /* wichtig: kein Scroll/Pan auf dem Joystick */
       user-select: none;
+      -webkit-user-select: none;
     }
     .stick {
       width: 34%;
@@ -65,6 +80,7 @@
     button:active { background: #eaeaea; }
   </style>
 </head>
+
 <body>
 <div class="wrap">
   <h2>Web Teleop (Touch-Joystick → /cmd_vel)</h2>
@@ -98,8 +114,8 @@
     </div>
 
     <div class="btnrow">
-      <button id="stopBtn">Stop</button>
-      <button id="recenterBtn">Stick zentrieren</button>
+      <button id="stopBtn" type="button">Stop</button>
+      <button id="recenterBtn" type="button">Stick zentrieren</button>
     </div>
 
     <p class="hint">
@@ -109,7 +125,7 @@
     </p>
 
     <div class="joy-area">
-      <div class="joystick" id="joystick">
+      <div class="joystick" id="joystick" aria-label="Touch Joystick">
         <div class="center-dot"></div>
         <div class="stick" id="stick"></div>
       </div>
@@ -152,14 +168,14 @@
   vmax.oninput = wmax.oninput = deadzone.oninput = expo.oninput = updateLabels;
   updateLabels();
 
-  // ---------- Math helpers ----------
+  // ---------- Helpers ----------
   function clamp(x, lo, hi) { return Math.max(lo, Math.min(hi, x)); }
 
   function applyDeadzone01(x, dz) {
     const ax = Math.abs(x);
     if (ax < dz) return 0.0;
     const sign = Math.sign(x);
-    const scaled = (ax - dz) / (1.0 - dz);
+    const scaled = (ax - dz) / (1.0 - dz); // rescale to [0..1]
     return sign * scaled;
   }
 
@@ -168,7 +184,7 @@
     return sign * Math.pow(Math.abs(x), e);
   }
 
-  // ---------- Joystick state (normalized: x,y in [-1..1]) ----------
+  // ---------- Joystick state (normalized) ----------
   const joy = document.getElementById("joystick");
   const stick = document.getElementById("stick");
 
@@ -176,14 +192,13 @@
   let pointerId = null;
 
   // normalized command from joystick
-  let jx = 0.0; // left/right
-  let jy = 0.0; // up/down (positive up in our convention)
+  let jx = 0.0; // left/right  in [-1..1]
+  let jy = 0.0; // up/down     in [-1..1], positive = up
 
   function setStickVisual(nx, ny) {
-    // nx, ny in [-1..1]
     const rect = joy.getBoundingClientRect();
     const radius = rect.width * 0.5;
-    const maxTravel = radius * 0.55; // knob travel limit
+    const maxTravel = radius * 0.55;
 
     const px = nx * maxTravel;
     const py = -ny * maxTravel; // screen y downwards
@@ -201,7 +216,6 @@
     const cx = rect.left + rect.width * 0.5;
     const cy = rect.top + rect.height * 0.5;
 
-    // dx,dy in pixels relative to center
     let dx = clientX - cx;
     let dy = clientY - cy;
 
@@ -230,11 +244,13 @@
     pointerId = e.pointerId;
     joy.setPointerCapture(pointerId);
     updateFromPointer(e.clientX, e.clientY);
+    e.preventDefault();
   });
 
   joy.addEventListener("pointermove", (e) => {
     if (!active || e.pointerId !== pointerId) return;
     updateFromPointer(e.clientX, e.clientY);
+    e.preventDefault();
   });
 
   function endPointer(e) {
@@ -242,9 +258,9 @@
     active = false;
     pointerId = null;
     resetJoystick();
-    // sofort Stop senden (zusätzlich Deadman im Server)
     send(0.0, 0.0);
     outEl.textContent = `v=0.00 m/s, w=0.00 rad/s`;
+    e.preventDefault();
   }
 
   joy.addEventListener("pointerup", endPointer);
@@ -254,6 +270,8 @@
       active = false;
       pointerId = null;
       resetJoystick();
+      send(0.0, 0.0);
+      outEl.textContent = `v=0.00 m/s, w=0.00 rad/s`;
     }
   });
 
@@ -271,23 +289,21 @@
   const PERIOD_MS = 50;
 
   setInterval(() => {
-    // Wenn nicht aktiv: trotzdem regelmäßig Stop senden (optional).
-    // Der Server hat Deadman; dieses Stop macht es "snappier".
     const dz = Number(deadzone.value);
     const e  = Number(expo.value);
 
-    // Deadzone + Expo auf Joystick-Normwerte
     const x = applyExpo(applyDeadzone01(jx, dz), e);
     const y = applyExpo(applyDeadzone01(jy, dz), e);
 
-    // Mapping: y -> v (vorwärts), x -> w (drehen)
     const vMax = Number(vmax.value);
     const wMax = Number(wmax.value);
 
+    // Mapping:
+    // v: y (hoch) -> vorwärts
+    // w: x (rechts) -> rechts drehen  => invertiert, weil bei dir links/rechts vertauscht war
     const v = clamp(y * vMax, -vMax, vMax);
-    const w = clamp(x * wMax, -wMax, wMax);
+    const w = clamp((-x) * wMax, -wMax, wMax);
 
-    // Wenn nicht aktiv, optional "hart" stoppen:
     if (!active) {
       send(0.0, 0.0);
       outEl.textContent = `v=0.00 m/s, w=0.00 rad/s`;
@@ -298,7 +314,7 @@
     outEl.textContent = `v=${v.toFixed(2)} m/s, w=${w.toFixed(2)} rad/s`;
   }, PERIOD_MS);
 
-  // Initial visual
+  // Init
   resetJoystick();
 </script>
 </body>
