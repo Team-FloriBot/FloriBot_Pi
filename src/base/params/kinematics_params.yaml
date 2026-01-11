@@ -1,10 +1,12 @@
 kinematics_node:
   ros__parameters:
-    wheel_separation: 0.8105
+    # Rotation Korrektur:
+    # odom: 6.284217 rad
+    # real: 362° = 6.317718 rad
+    # Faktor = odom/real = 0.99470
+    # 0.8084 -> 0.8041
+    wheel_separation: 0.8041
 
-    # Fein-Kalibrierung (Laser):
-    # real 2.034 m, odom 2.043854715736173 m
-    # Faktor = real/odom = 0.995178 -> Radius minimal kleiner
     wheel_radius: 0.09688
 
     ticks_per_rev: 131000.0
