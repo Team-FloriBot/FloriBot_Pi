@@ -1,6 +1,5 @@
 #include "base/kinematics_node.h"
 
-#include <algorithm>
 #include <cmath>
 
 #include "tf2/LinearMath/Quaternion.h"
@@ -13,39 +12,41 @@ namespace base {
 KinematicsNode::KinematicsNode()
 : Node("kinematics_node")
 {
-  // --- Parameters (same “role” as FloriBot1.0) ---
-  this->declare_parameter("wheel_separation", wheel_sep_);
-  this->declare_parameter("wheel_radius", wheel_rad_);
-  this->declare_parameter("ticks_per_rev", ticks_per_rev_);
-  this->declare_parameter("unwrap_modulo", unwrap_modulo_);
-  this->declare_parameter("modulo_ticks", modulo_ticks_);
-  this->declare_parameter("publish_tf", publish_tf_);
+  // Parameters
+  declare_parameter("wheel_separation", wheel_sep_);
+  declare_parameter("wheel_radius", wheel_rad_);
 
-  this->declare_parameter("cmd_vel_topic", cmd_vel_topic_);
-  this->declare_parameter("wheel_cmd_topic", wheel_cmd_topic_);
-  this->declare_parameter("wheel_ticks_topic", wheel_ticks_topic_);
-  this->declare_parameter("odom_topic", odom_topic_);
+  declare_parameter("ticks_per_rev", ticks_per_rev_);
+  declare_parameter("unwrap_modulo", unwrap_modulo_);
+  declare_parameter("modulo_ticks", modulo_ticks_);
+  declare_parameter("publish_tf", publish_tf_);
 
-  this->declare_parameter("odom_frame_id", odom_frame_id_);
-  this->declare_parameter("base_frame_id", base_frame_id_);
+  declare_parameter("cmd_vel_topic", cmd_vel_topic_);
+  declare_parameter("wheel_cmd_topic", wheel_cmd_topic_);
+  declare_parameter("wheel_ticks_topic", wheel_ticks_topic_);
+  declare_parameter("odom_topic", odom_topic_);
 
-  wheel_sep_       = this->get_parameter("wheel_separation").as_double();
-  wheel_rad_       = this->get_parameter("wheel_radius").as_double();
-  ticks_per_rev_   = this->get_parameter("ticks_per_rev").as_double();
-  unwrap_modulo_   = this->get_parameter("unwrap_modulo").as_bool();
-  modulo_ticks_    = this->get_parameter("modulo_ticks").as_int();
-  publish_tf_      = this->get_parameter("publish_tf").as_bool();
+  declare_parameter("odom_frame_id", odom_frame_id_);
+  declare_parameter("base_frame_id", base_frame_id_);
 
-  cmd_vel_topic_      = this->get_parameter("cmd_vel_topic").as_string();
-  wheel_cmd_topic_    = this->get_parameter("wheel_cmd_topic").as_string();
-  wheel_ticks_topic_  = this->get_parameter("wheel_ticks_topic").as_string();
-  odom_topic_         = this->get_parameter("odom_topic").as_string();
+  wheel_sep_     = get_parameter("wheel_separation").as_double();
+  wheel_rad_     = get_parameter("wheel_radius").as_double();
 
-  odom_frame_id_   = this->get_parameter("odom_frame_id").as_string();
-  base_frame_id_   = this->get_parameter("base_frame_id").as_string();
+  ticks_per_rev_ = get_parameter("ticks_per_rev").as_double();
+  unwrap_modulo_ = get_parameter("unwrap_modulo").as_bool();
+  modulo_ticks_  = get_parameter("modulo_ticks").as_int();
+  publish_tf_    = get_parameter("publish_tf").as_bool();
 
-  if (wheel_sep_ <= 0.0)  throw std::runtime_error("wheel_separation must be > 0");
-  if (wheel_rad_ <= 0.0)  throw std::runtime_error("wheel_radius must be > 0");
+  cmd_vel_topic_     = get_parameter("cmd_vel_topic").as_string();
+  wheel_cmd_topic_   = get_parameter("wheel_cmd_topic").as_string();
+  wheel_ticks_topic_ = get_parameter("wheel_ticks_topic").as_string();
+  odom_topic_        = get_parameter("odom_topic").as_string();
+
+  odom_frame_id_ = get_parameter("odom_frame_id").as_string();
+  base_frame_id_ = get_parameter("base_frame_id").as_string();
+
+  if (wheel_sep_ <= 0.0) throw std::runtime_error("wheel_separation must be > 0");
+  if (wheel_rad_ <= 0.0) throw std::runtime_error("wheel_radius must be > 0");
   if (ticks_per_rev_ <= 0.0) throw std::runtime_error("ticks_per_rev must be > 0");
 
   if (modulo_ticks_ <= 0) {
@@ -55,45 +56,44 @@ KinematicsNode::KinematicsNode()
     modulo_ticks_ = 1;
   }
 
-  // --- Initialize library and TF broadcaster (FloriBot1.0 style) ---
   kinematics_ = std::make_unique<KinematicsCalculator>(wheel_sep_, wheel_rad_);
 
   if (publish_tf_) {
     tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
   }
 
-  // --- Pub/Sub ---
-  sub_cmd_vel_ = this->create_subscription<geometry_msgs::msg::Twist>(
+  sub_cmd_vel_ = create_subscription<geometry_msgs::msg::Twist>(
     cmd_vel_topic_, 10, std::bind(&KinematicsNode::cmdVelCallback, this, _1));
 
-  sub_ticks_ = this->create_subscription<base::msg::WheelTicks4>(
+  sub_ticks_ = create_subscription<base::msg::WheelTicks4>(
     wheel_ticks_topic_, 50, std::bind(&KinematicsNode::wheelTicksCallback, this, _1));
 
-  pub_wheel_cmd_ = this->create_publisher<base::msg::WheelVelocities>(wheel_cmd_topic_, 10);
-  pub_odom_ = this->create_publisher<nav_msgs::msg::Odometry>(odom_topic_, 10);
+  pub_wheel_cmd_ = create_publisher<base::msg::WheelVelocities>(wheel_cmd_topic_, 10);
+  pub_odom_ = create_publisher<nav_msgs::msg::Odometry>(odom_topic_, 10);
 
-  last_odom_time_ = this->now();
+  last_odom_time_ = now();
 
-  RCLCPP_INFO(this->get_logger(),
-    "Kinematics+Odom initialized. sep=%.4f rad=%.4f tpr=%.3f unwrap=%d mod=%d",
-    wheel_sep_, wheel_rad_, ticks_per_rev_, (int)unwrap_modulo_, modulo_ticks_);
+  RCLCPP_INFO(get_logger(),
+    "kinematics_node started | cmd=%s -> wheel_cmd=%s | ticks=%s -> odom=%s | track_width=%.3f m wheel_radius=%.3f m",
+    cmd_vel_topic_.c_str(), wheel_cmd_topic_.c_str(),
+    wheel_ticks_topic_.c_str(), odom_topic_.c_str(),
+    wheel_sep_, wheel_rad_);
 }
 
 void KinematicsNode::cmdVelCallback(const geometry_msgs::msg::Twist::SharedPtr msg)
 {
-  // cmd_vel -> target wheel speeds (rad/s) for diff drive
-  WheelSpeedSet speeds = kinematics_->calculateWheelSpeeds(msg->linear.x, msg->angular.z);
+  WheelSpeedSet ws = kinematics_->calculateWheelSpeeds(msg->linear.x, msg->angular.z);
 
   base::msg::WheelVelocities out;
-  out.left  = speeds.left;
-  out.right = speeds.right;
+  out.left  = ws.left;
+  out.right = ws.right;
 
   pub_wheel_cmd_->publish(out);
 }
 
 void KinematicsNode::wheelTicksCallback(const base::msg::WheelTicks4::SharedPtr msg)
 {
-  const rclcpp::Time stamp = (msg->header.stamp.nanoseconds() != 0) ? rclcpp::Time(msg->header.stamp) : this->now();
+  const rclcpp::Time stamp = (msg->header.stamp.nanoseconds() != 0) ? rclcpp::Time(msg->header.stamp) : now();
 
   const int64_t fl = msg->fl_ticks;
   const int64_t fr = msg->fr_ticks;
@@ -130,7 +130,7 @@ void KinematicsNode::wheelTicksCallback(const base::msg::WheelTicks4::SharedPtr 
   prev_fl_ = fl; prev_fr_ = fr; prev_rl_ = rl; prev_rr_ = rr;
   last_odom_time_ = stamp;
 
-  // 4WD diff drive: average per side
+  // 4WD diff-drive: mean per side
   const double dleft_ticks  = 0.5 * (static_cast<double>(dfl) + static_cast<double>(drl));
   const double dright_ticks = 0.5 * (static_cast<double>(dfr) + static_cast<double>(drr));
 
@@ -143,7 +143,7 @@ void KinematicsNode::wheelTicksCallback(const base::msg::WheelTicks4::SharedPtr 
   const double ds_left  = wheel_rad_ * dphi_left;
   const double ds_right = wheel_rad_ * dphi_right;
 
-  // diff-drive integration
+  // integration
   const double ds = 0.5 * (ds_left + ds_right);
   const double dtheta = (ds_right - ds_left) / wheel_sep_;
 
