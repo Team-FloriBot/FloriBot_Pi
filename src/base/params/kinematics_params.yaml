@@ -1,10 +1,9 @@
 kinematics_node:
   ros__parameters:
-    # Kalibrierung Rotation:
-    # bei wheel_separation=0.1925: 360° Soll -> 90° Ist => f=4
-    # => wheel_separation_new = 0.1925 * 4 = 0.77
-    wheel_separation: 0.77
+    # zurück auf plausible Spurweite (sonst wird bei kleinen Radien ein Rad rückwärts -> Pivot)
+    wheel_separation: 0.385
 
+    # so lassen, wenn geradeaus stimmt
     wheel_radius: 0.093
 
     ticks_per_rev: 131000.0
