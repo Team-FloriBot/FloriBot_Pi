@@ -9,17 +9,17 @@ hardware_node:
     ticks_per_rev: 131000.0
 
     # ================= Speed estimation =================
-    speed_window_s: 0.03
-    meas_alpha: 0.15
+    speed_window_s: 0.02
+    meas_alpha: 0.10
     meas_w_eps: 0.005
 
-    # ================= Controller (PI - sehr konservativ) =================
-    kp: 0.040
-    ki: 0.040
+    # ================= Controller (PI, sehr weich) =================
+    kp: 0.045
+    ki: 0.015
     kd: 0.0
 
     output_limit: 1.0
-    deadband: 0.01
+    deadband: 0.005
 
     setpoint_max_accel: 2.0
     stop_eps_radps: 0.02
@@ -27,8 +27,8 @@ hardware_node:
     # ================= Actuator shaping =================
     u_slew_rate: 0.0
 
-    # u_min kleiner, damit kein "Klemmen" um den Sollwert
-    u_min: 0.10
+    # --- Stiction-Kompensation AUS (nur Diagnose gegen 2 Hz Limit-Cycle) ---
+    u_min: 0.0
     u_min_apply_radps: 0.25
 
     u_kick: 0.0
