@@ -14,12 +14,12 @@ hardware_node:
     deadband: 0.0
     setpoint_max_accel: 1000000000.0
 
-    # Encoder source like FloriBot Pi encodertest: /joint_states
+    # Encoder source: phidgets_high_speed_encoder publishes joint0..joint3 by default
     joint_states_topic: "/joint_states"
-    fl_joint: "fl_joint"
-    fr_joint: "fr_joint"
-    rl_joint: "rl_joint"
-    rr_joint: "rr_joint"
+    fl_joint: "joint2"
+    fr_joint: "joint3"
+    rl_joint: "joint0"
+    rr_joint: "joint1"
 
     invert_fl: false
     invert_fr: false
@@ -32,7 +32,6 @@ hardware_node:
 
     # Order: [FL, FR, RL, RR]
     wheel_channels: [2, 3, 0, 1]
-    # Use -1.0 to invert motor polarity per wheel if needed
     wheel_gains:    [1.0, 1.0, 1.0, 1.0]
 
     k_us_per_pct: 5.5
