@@ -14,14 +14,20 @@ namespace base {
 class PIDController {
 public:
   PIDController(double kp, double ki, double kd,
-                double output_limit = 1.0,
-                double deadband = 0.05,
-                double max_accel = 1.0);
+                double output_limit,
+                double deadband,
+                double max_accel);
 
   void reset();
 
-  /// Compute control output in [-output_limit .. +output_limit]
-  double compute(double target_setpoint, double measured, double dt);
+  /**
+   * @param freeze_integrator If true, the I term is not updated for this step.
+   * @param update_state If false, the output is computed using a copy of the internal state (preview),
+   *                    without changing the controller state.
+   */
+  double compute(double target_setpoint, double measured, double dt,
+                 bool freeze_integrator = false,
+                 bool update_state = true);
 
 private:
   double kp_{0.0}, ki_{0.0}, kd_{0.0};
