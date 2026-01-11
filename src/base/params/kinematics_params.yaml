@@ -1,10 +1,13 @@
 kinematics_node:
   ros__parameters:
-    # zurück auf plausible Spurweite (sonst wird bei kleinen Radien ein Rad rückwärts -> Pivot)
+    # Spurweite (wird als Nächstes über Rotation kalibriert)
     wheel_separation: 0.385
 
-    # so lassen, wenn geradeaus stimmt
-    wheel_radius: 0.093
+    # FINAL kalibrierter Radradius
+    # odom: 2.0204 m
+    # real: 2.115 m
+    # Faktor: 1.04678
+    wheel_radius: 0.09735
 
     ticks_per_rev: 131000.0
     unwrap_modulo: false
