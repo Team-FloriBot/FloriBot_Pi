@@ -83,7 +83,7 @@ static bool getJointPosition(const sensor_msgs::msg::JointState& js, const std::
   return true;
 }
 
-// encodertest behavior: JointState.position is already "ticks"
+// encodertest behavior: JointState.position already encodes "ticks"
 static int64_t toTicks(double pos, bool invert)
 {
   const int64_t t = static_cast<int64_t>(std::llround(pos));
@@ -116,12 +116,16 @@ public:
       std::bind(&HardwareNode::controlLoop, this));
 
     RCLCPP_INFO(get_logger(),
-      "hardware_node: motor I2C dev=%s addr=%d, joint_states=%s",
-      i2c_dev_.c_str(), i2c_addr_, joint_states_topic_.c_str());
+      "hardware_node: I2C dev=%s addr=%d, joint_states=%s, wheel_cmd=%s",
+      i2c_dev_.c_str(), i2c_addr_, joint_states_topic_.c_str(), wheel_cmd_topic_.c_str());
   }
 
   ~HardwareNode() override
   {
+    // go neutral on shutdown
+    for (int i = 0; i < WHEEL_COUNT; ++i) {
+      try { writeMotor(i, 0.0); } catch (...) {}
+    }
     nxt_.closeBus();
   }
 
@@ -137,19 +141,23 @@ private:
   double ticks_per_rev_{2048.0};
 
   // PID
-  double kp_{0.6};
+  double kp_{0.2};
   double ki_{0.0};
   double kd_{0.0};
   double output_limit_{1.0};
-  double deadband_{0.0};
+  double deadband_{0.08};
   double setpoint_max_accel_{std::numeric_limits<double>::infinity()};
+
+  // Anti-jitter / standstill handling
+  double stop_eps_radps_{0.03};  // if |setpoint| < stop_eps -> neutral + reset PID
+  double meas_w_eps_{0.05};      // if |measured| < meas_w_eps -> treat as 0
 
   // Encoder via /joint_states
   std::string joint_states_topic_{"/joint_states"};
-  std::string fl_joint_{"fl_joint"};
-  std::string fr_joint_{"fr_joint"};
-  std::string rl_joint_{"rl_joint"};
-  std::string rr_joint_{"rr_joint"};
+  std::string fl_joint_{"joint2"};
+  std::string fr_joint_{"joint3"};
+  std::string rl_joint_{"joint0"};
+  std::string rr_joint_{"joint1"};
 
   bool invert_fl_{false};
   bool invert_fr_{false};
@@ -164,7 +172,7 @@ private:
   int i2c_addr_{0x58};
 
   std::array<int, 4> wheel_channels_{{2, 3, 0, 1}};            // [FL, FR, RL, RR]
-  std::array<double, 4> wheel_gains_{{1.0, 1.0, 1.0, 1.0}};    // sign/polarity per wheel
+  std::array<double, 4> wheel_gains_{{1.0, 1.0, 1.0, 1.0}};    // polarity per wheel
 
   double k_us_per_pct_{5.5};
   int neutral_us_{1480};
@@ -206,6 +214,9 @@ private:
     declare_parameter<double>("output_limit", output_limit_);
     declare_parameter<double>("deadband", deadband_);
     declare_parameter<double>("setpoint_max_accel", setpoint_max_accel_);
+
+    declare_parameter<double>("stop_eps_radps", stop_eps_radps_);
+    declare_parameter<double>("meas_w_eps", meas_w_eps_);
 
     declare_parameter<std::string>("joint_states_topic", joint_states_topic_);
     declare_parameter<std::string>("fl_joint", fl_joint_);
@@ -255,6 +266,9 @@ private:
     deadband_     = get_parameter("deadband").as_double();
     setpoint_max_accel_ = get_parameter("setpoint_max_accel").as_double();
 
+    stop_eps_radps_ = get_parameter("stop_eps_radps").as_double();
+    meas_w_eps_     = get_parameter("meas_w_eps").as_double();
+
     joint_states_topic_ = get_parameter("joint_states_topic").as_string();
     fl_joint_ = get_parameter("fl_joint").as_string();
     fr_joint_ = get_parameter("fr_joint").as_string();
@@ -299,6 +313,7 @@ private:
         deadband_,
         setpoint_max_accel_
       );
+      pid_[i]->reset();
     }
   }
 
@@ -340,41 +355,57 @@ private:
     have_joint_state_ = true;
   }
 
-void controlLoop()
-{
-  // measured wheel speed from tick delta
-  double meas_w_radps[WHEEL_COUNT]{0.0, 0.0, 0.0, 0.0};
+  void controlLoop()
+  {
+    // compute measured speed from tick delta
+    double meas_w_radps[WHEEL_COUNT]{0.0, 0.0, 0.0, 0.0};
 
-  for (int i = 0; i < WHEEL_COUNT; ++i) {
-    const int64_t t = ticks_[i].load(std::memory_order_relaxed);
-    const int64_t dticks = t - ticks_last_[i];
-    ticks_last_[i] = t;
-
-    const double rev = static_cast<double>(dticks) / ticks_per_rev_;
-    const double rad = rev * 2.0 * M_PI;
-    meas_w_radps[i] = rad / control_dt_;
-  }
-
-  // If no encoder feedback yet: hold neutral (no movement)
-  if (!have_joint_state_) {
-    for (int i = 0; i < WHEEL_COUNT; ++i) writeMotor(i, 0.0);
-  } else {
     for (int i = 0; i < WHEEL_COUNT; ++i) {
-      const double u = pid_[i]->compute(target_w_radps_[i], meas_w_radps[i], control_dt_);
+      const int64_t t = ticks_[i].load(std::memory_order_relaxed);
+      const int64_t dticks = t - ticks_last_[i];
+      ticks_last_[i] = t;
+
+      const double rev = static_cast<double>(dticks) / ticks_per_rev_;
+      const double rad = rev * 2.0 * M_PI;
+      meas_w_radps[i] = rad / control_dt_;
+
+      if (std::abs(meas_w_radps[i]) < meas_w_eps_) {
+        meas_w_radps[i] = 0.0;
+      }
+    }
+
+    // closed-loop per wheel with standstill hold
+    for (int i = 0; i < WHEEL_COUNT; ++i) {
+      const double sp = target_w_radps_[i];
+
+      // If no encoder feedback yet: keep neutral and reset integrator state
+      if (!have_joint_state_) {
+        pid_[i]->reset();
+        writeMotor(i, 0.0);
+        continue;
+      }
+
+      // Standstill anti-jitter: disable control near zero setpoint
+      if (std::abs(sp) < stop_eps_radps_) {
+        pid_[i]->reset();
+        writeMotor(i, 0.0);
+        continue;
+      }
+
+      const double u = pid_[i]->compute(sp, meas_w_radps[i], control_dt_);
       writeMotor(i, u);
     }
+
+    // publish ticks always (so you can debug even if have_joint_state_ is false)
+    base::msg::WheelTicks4 out;
+    out.header.stamp = have_joint_state_ ? last_joint_stamp_ : now();
+    out.header.frame_id = ticks_frame_id_;
+    out.fl_ticks = ticks_[FL].load(std::memory_order_relaxed);
+    out.fr_ticks = ticks_[FR].load(std::memory_order_relaxed);
+    out.rl_ticks = ticks_[RL].load(std::memory_order_relaxed);
+    out.rr_ticks = ticks_[RR].load(std::memory_order_relaxed);
+    ticks_pub_->publish(out);
   }
-
-  base::msg::WheelTicks4 out;
-  out.header.stamp = have_joint_state_ ? last_joint_stamp_ : now();
-  out.header.frame_id = ticks_frame_id_;
-  out.fl_ticks = ticks_[FL].load(std::memory_order_relaxed);
-  out.fr_ticks = ticks_[FR].load(std::memory_order_relaxed);
-  out.rl_ticks = ticks_[RL].load(std::memory_order_relaxed);
-  out.rr_ticks = ticks_[RR].load(std::memory_order_relaxed);
-  ticks_pub_->publish(out);
-}
-
 
   void writeMotor(int wheel, double u_norm)
   {
