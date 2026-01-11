@@ -2,60 +2,87 @@
 <html lang="de">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
-  <title>FloriBot Web Teleop (Touch Joystick)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no, viewport-fit=cover" />
+  <title>FloriBot Web Teleop</title>
 
   <style>
-    /* Mobile: keine Textmarkierung/Callouts, kein Highlight */
-    * {
+    /* Kein Scrollen, keine Textmarkierung, kein iOS Callout */
+    html, body {
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      overscroll-behavior: none;
       -webkit-user-select: none;
+      user-select: none;
       -webkit-touch-callout: none;
       -webkit-tap-highlight-color: transparent;
-      user-select: none;
-      touch-action: manipulation;
+      touch-action: none;
+      background: #fff;
+      font-family: sans-serif;
     }
-    html, body { overscroll-behavior: none; }
 
-    body { font-family: sans-serif; margin: 20px; }
-    .wrap { max-width: 720px; }
-
-    .card {
-      padding: 14px;
-      border: 1px solid #ddd;
-      border-radius: 12px;
+    .page {
+      height: 100%;
+      width: 100%;
       display: grid;
+      grid-template-rows: auto 1fr;
       gap: 10px;
+      padding: 14px;
+      box-sizing: border-box;
     }
 
-    .status { margin: 0; }
-    code { background: #f6f6f6; padding: 2px 6px; border-radius: 6px; }
-
-    .row {
+    .top {
       display: grid;
-      grid-template-columns: 200px 1fr 70px;
+      gap: 6px;
+    }
+
+    .title {
+      font-size: 18px;
+      font-weight: 600;
+      margin: 0;
+    }
+
+    .status {
+      margin: 0;
+      font-size: 14px;
+    }
+
+    .out code {
+      background: #f6f6f6;
+      padding: 2px 6px;
+      border-radius: 6px;
+    }
+
+    .controls {
+      display: grid;
+      gap: 12px;
+      align-items: center;
+      justify-items: center;
+    }
+
+    .slider {
+      width: min(520px, 100%);
+      display: grid;
+      grid-template-columns: 140px 1fr 60px;
       gap: 10px;
       align-items: center;
+      font-size: 14px;
     }
+
     input[type="range"] { width: 100%; }
 
     /* Joystick */
-    .joy-area {
-      margin-top: 10px;
-      display: grid;
-      justify-items: center;
-    }
     .joystick {
-      width: min(75vw, 340px);
+      width: min(78vw, 380px);
+      max-width: 380px;
       aspect-ratio: 1 / 1;
       border-radius: 999px;
       border: 2px solid #bbb;
       background: radial-gradient(circle at 30% 30%, #fafafa, #eaeaea);
       position: relative;
-
-      touch-action: none; /* entscheidend: kein Scroll/Pan */
-      user-select: none;
-      -webkit-user-select: none;
+      touch-action: none;
     }
+
     .stick {
       width: 34%;
       height: 34%;
@@ -68,6 +95,7 @@
       transform: translate(-50%, -50%);
       pointer-events: none;
     }
+
     .center-dot {
       width: 8px;
       height: 8px;
@@ -84,52 +112,44 @@
 </head>
 
 <body>
-<div class="wrap">
-  <h2>Web Teleop</h2>
-
-  <div class="card">
-    <p class="status" id="wsStatus">WebSocket: nicht verbunden</p>
-    <p class="status">Sende: <code id="out">v=0.00 m/s, w=0.00 rad/s</code></p>
-
-    <div class="row">
-      <label for="vmax">Max v (m/s)</label>
-      <input id="vmax" type="range" min="0.05" max="1.00" step="0.05" value="0.25" />
-      <span id="vmaxVal">0.25</span>
+  <div class="page">
+    <div class="top">
+      <p class="title">Web Teleop</p>
+      <p class="status" id="wsStatus">WebSocket: nicht verbunden</p>
+      <p class="status out">Sende: <code id="out">v=0.00 m/s, w=0.00 rad/s</code></p>
     </div>
 
-    <div class="row">
-      <label for="wmax">Max w (rad/s)</label>
-      <input id="wmax" type="range" min="0.10" max="3.00" step="0.10" value="0.90" />
-      <span id="wmaxVal">0.90</span>
-    </div>
+    <div class="controls">
+      <div class="slider">
+        <label for="vmax">Max v (m/s)</label>
+        <input id="vmax" type="range" min="0.05" max="1.00" step="0.05" value="0.25" />
+        <span id="vmaxVal">0.25</span>
+      </div>
 
-    <div class="row">
-      <label for="deadzone">Deadzone</label>
-      <input id="deadzone" type="range" min="0.00" max="0.30" step="0.01" value="0.06" />
-      <span id="deadzoneVal">0.06</span>
-    </div>
+      <div class="slider">
+        <label for="wmax">Max w (rad/s)</label>
+        <input id="wmax" type="range" min="0.10" max="3.00" step="0.10" value="0.90" />
+        <span id="wmaxVal">0.90</span>
+      </div>
 
-    <div class="row">
-      <label for="expo">Expo</label>
-      <input id="expo" type="range" min="1.0" max="3.0" step="0.1" value="1.6" />
-      <span id="expoVal">1.6</span>
-    </div>
-
-    <div class="joy-area">
       <div class="joystick" id="joystick" aria-label="Touch Joystick">
         <div class="center-dot"></div>
         <div class="stick" id="stick"></div>
       </div>
     </div>
   </div>
-</div>
 
 <script>
+  // Zusätzlich Standard-Gesten verhindern (iOS/Safari)
+  document.addEventListener("gesturestart", (e) => e.preventDefault(), { passive: false });
+  document.addEventListener("gesturechange", (e) => e.preventDefault(), { passive: false });
+  document.addEventListener("gestureend", (e) => e.preventDefault(), { passive: false });
+
   // ---------- WebSocket ----------
   const wsStatus = document.getElementById("wsStatus");
   const outEl = document.getElementById("out");
-  const ws = new WebSocket(`ws://${location.host}/ws`);
 
+  const ws = new WebSocket(`ws://${location.host}/ws`);
   ws.onopen = () => wsStatus.textContent = "WebSocket: verbunden";
   ws.onclose = () => wsStatus.textContent = "WebSocket: getrennt";
 
@@ -142,38 +162,18 @@
   // ---------- UI ----------
   const vmax = document.getElementById("vmax");
   const wmax = document.getElementById("wmax");
-  const deadzone = document.getElementById("deadzone");
-  const expo = document.getElementById("expo");
-
   const vmaxVal = document.getElementById("vmaxVal");
   const wmaxVal = document.getElementById("wmaxVal");
-  const deadzoneVal = document.getElementById("deadzoneVal");
-  const expoVal = document.getElementById("expoVal");
 
   function updateLabels() {
     vmaxVal.textContent = Number(vmax.value).toFixed(2);
     wmaxVal.textContent = Number(wmax.value).toFixed(2);
-    deadzoneVal.textContent = Number(deadzone.value).toFixed(2);
-    expoVal.textContent = Number(expo.value).toFixed(1);
   }
-  vmax.oninput = wmax.oninput = deadzone.oninput = expo.oninput = updateLabels;
+  vmax.oninput = wmax.oninput = updateLabels;
   updateLabels();
 
   // ---------- Helpers ----------
   function clamp(x, lo, hi) { return Math.max(lo, Math.min(hi, x)); }
-
-  function applyDeadzone01(x, dz) {
-    const ax = Math.abs(x);
-    if (ax < dz) return 0.0;
-    const sign = Math.sign(x);
-    const scaled = (ax - dz) / (1.0 - dz);
-    return sign * scaled;
-  }
-
-  function applyExpo(x, e) {
-    const sign = Math.sign(x);
-    return sign * Math.pow(Math.abs(x), e);
-  }
 
   // ---------- Joystick state (normalized) ----------
   const joy = document.getElementById("joystick");
@@ -191,7 +191,7 @@
     const maxTravel = radius * 0.55;
 
     const px = nx * maxTravel;
-    const py = -ny * maxTravel; // Screen-Y nach unten
+    const py = -ny * maxTravel;
 
     stick.style.transform = `translate(${px}px, ${py}px) translate(-50%, -50%)`;
   }
@@ -220,7 +220,7 @@
     }
 
     jx = clamp(dx / maxTravel, -1.0, 1.0);
-    jy = clamp(-dy / maxTravel, -1.0, 1.0); // hoch positiv
+    jy = clamp(-dy / maxTravel, -1.0, 1.0);
 
     setStickVisual(jx, jy);
   }
@@ -231,26 +231,26 @@
     joy.setPointerCapture(pointerId);
     updateFromPointer(e.clientX, e.clientY);
     e.preventDefault();
-  });
+  }, { passive: false });
 
   joy.addEventListener("pointermove", (e) => {
     if (!active || e.pointerId !== pointerId) return;
     updateFromPointer(e.clientX, e.clientY);
     e.preventDefault();
-  });
+  }, { passive: false });
 
   function endPointer(e) {
     if (e.pointerId !== pointerId) return;
     active = false;
     pointerId = null;
     resetJoystick();
-    send(0.0, 0.0); // sofort stoppen
+    send(0.0, 0.0);
     outEl.textContent = `v=0.00 m/s, w=0.00 rad/s`;
     e.preventDefault();
   }
 
-  joy.addEventListener("pointerup", endPointer);
-  joy.addEventListener("pointercancel", endPointer);
+  joy.addEventListener("pointerup", endPointer, { passive: false });
+  joy.addEventListener("pointercancel", endPointer, { passive: false });
   joy.addEventListener("lostpointercapture", () => {
     if (!active) return;
     active = false;
@@ -264,21 +264,17 @@
   const PERIOD_MS = 50;
 
   setInterval(() => {
-    const dz = Number(deadzone.value);
-    const e  = Number(expo.value);
-
-    const x = applyExpo(applyDeadzone01(jx, dz), e);
-    const y = applyExpo(applyDeadzone01(jy, dz), e);
-
     const vMax = Number(vmax.value);
     const wMax = Number(wmax.value);
 
-    const v = clamp(y * vMax, -vMax, vMax);
+    // v: hoch = vorwärts, runter = rückwärts
+    const v = clamp(jy * vMax, -vMax, vMax);
 
-    // Dreh-Richtung soll sich NICHT beim Rückwärtsfahren umkehren:
-    // => w immer vom x ableiten, unabhängig vom Vorzeichen von v
-    // Falls aktuell bei Vorwärts richtig: w = -x*wMax beibehalten.
-    const w = clamp((-x) * wMax, -wMax, wMax);
+    // w: rechts am Stick -> rechts drehen (Basisvorzeichen -jx)
+    // Beim Rückwärtsfahren soll links/rechts nicht "gefühlt" invertieren:
+    // => invertiere w, wenn jy < 0 (rückwärts)
+    const steerSign = (jy >= 0.0) ? 1.0 : -1.0;
+    const w = clamp(((-jx) * wMax) * steerSign, -wMax, wMax);
 
     if (!active) {
       send(0.0, 0.0);
