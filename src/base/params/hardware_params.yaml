@@ -7,14 +7,21 @@ hardware_node:
     control_dt: 0.02
     ticks_per_rev: 2048.0
 
-    kp: 0.6
+    # Conservative gains for first hardware test
+    kp: 0.2
     ki: 0.0
     kd: 0.0
     output_limit: 1.0
-    deadband: 0.0
+
+    # Deadband in controller output (prevents small oscillations)
+    deadband: 0.08
     setpoint_max_accel: 1000000000.0
 
-    # Encoder source: phidgets_high_speed_encoder publishes joint0..joint3 by default
+    # Anti-jitter parameters (rad/s)
+    stop_eps_radps: 0.03
+    meas_w_eps: 0.05
+
+    # Encoder source (phidgets default names)
     joint_states_topic: "/joint_states"
     fl_joint: "joint2"
     fr_joint: "joint3"
