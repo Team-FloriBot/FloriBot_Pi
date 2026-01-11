@@ -1,12 +1,21 @@
 kinematics_node:
   ros__parameters:
-    cmd_vel_topic: /cmd_vel
-    wheel_cmd_topic: /wheel_commands
+    # Robot geometry
+    wheel_separation: 0.30     # [m] track width left<->right
+    wheel_radius: 0.05         # [m]
 
-    # 4-wheel diff-drive geometry (same equations as 2-wheel diff-drive)
-    track_width_m: 0.385
-    wheel_radius_m: 0.10
+    # Encoder model
+    ticks_per_rev: 2048.0
+    unwrap_modulo: true
+    modulo_ticks: 2048
 
-    # safety limits applied to /cmd_vel
-    v_max_mps: 0.4
-    w_max_rps: 2.0
+    # Topics (FloriBot1.0-like responsibilities)
+    cmd_vel_topic: "/cmd_vel"
+    wheel_cmd_topic: "/wheel_commands"
+    wheel_ticks_topic: "/base/wheel_ticks4"
+    odom_topic: "/odom"
+
+    # Frames
+    odom_frame_id: "odom"
+    base_frame_id: "base_link"
+    publish_tf: true
