@@ -190,9 +190,9 @@ def main():
     rclpy.spin_once(node, timeout_sec=1.0)
 
     # Testläufe
-    #node.drive_circle(radius=0.5, v=1.8)
+    node.drive_circle(radius=0.3, v=0.8)
     #node.drive_straight(distance=2.0, v=0.2)
-    node.rotate(n_rotations=1, omega=0.8)
+    #node.rotate(n_rotations=1, omega=0.8)
     #node.rotate(n_rotations=5, omega=0.5)
 
     node.destroy_node()
