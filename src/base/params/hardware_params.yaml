@@ -4,6 +4,7 @@ hardware_node:
     wheel_ticks_topic: "/base/wheel_ticks4"
     ticks_frame_id: "base_link"
 
+    # ---------------- Control ----------------
     # Control loop period (s)
     control_dt: 0.02
 
@@ -11,47 +12,41 @@ hardware_node:
     ticks_per_rev: 131000.0
 
     # ---------------- Speed estimation / filtering ----------------
-    # speed_window_s is interpreted as a *low-pass time constant* tau (s).
-    # Smaller tau -> faster (less phase lag), more noise.
-    # Larger tau -> smoother, more lag.
+    # speed_window_s is interpreted as a low-pass time constant tau (s)
     speed_window_s: 0.05
 
-    # Additional smoothing factor kept for backward compatibility.
-    # 0.0 = no extra smoothing, 1.0 = very strong smoothing.
+    # additional smoothing (0 = none, 1 = very strong)
     meas_alpha: 0.20
 
-    # Speeds below this are forced to 0 (rad/s) to suppress jitter.
+    # speeds below this are forced to zero (rad/s)
     meas_w_eps: 0.03
 
-    # ---------------- Controller (start values for tuning) ----------------
-    # Start with PI disabled (ki=0) for the first tuning step.
-    kp: 0.05
-    ki: 0.00
-    kd: 0.00
+    # ---------------- Controller (P-TUNING) ----------------
+    # Überschwingen → KP reduziert
+    kp: 0.035
+    ki: 0.0
+    kd: 0.0
 
     output_limit: 1.0
     deadband: 0.10
 
-    # Setpoint ramp limit (rad/s^2). Keep moderate during tuning.
+    # moderate ramp, damit kein Setpoint-Schock
     setpoint_max_accel: 2.0
 
-    # If |setpoint| < stop_eps_radps -> motor command set to 0 and PID reset.
+    # below this setpoint PID is reset and motor stopped
     stop_eps_radps: 0.10
 
-    # ---------------- Actuator shaping / non-linearities ----------------
-    # Slew limiting on u (1/s). 0 disables.
-    # Disable during tuning to avoid extra lag.
+    # ---------------- Actuator shaping (DISABLED for tuning) ----------------
+    # slew rate limiting disabled
     u_slew_rate: 0.0
 
-    # Stiction compensation (minimum output when moving).
-    # Disable during tuning (u_min=0), then re-enable if needed.
-    u_min: 0.00
-    # Apply u_min only if |setpoint| >= this threshold (rad/s)
+    # stiction compensation disabled
+    u_min: 0.0
     u_min_apply_radps: 0.35
 
-    # Optional start kick (additive), keep OFF during tuning.
-    u_kick: 0.00
-    kick_time_s: 0.00
+    # start kick disabled
+    u_kick: 0.0
+    kick_time_s: 0.0
 
     # ---------------- Hardware ----------------
     i2c_dev: "/dev/i2c-1"
