@@ -5,6 +5,8 @@ hardware_node:
     ticks_frame_id: "base_link"
 
     control_dt: 0.02
+
+    # !!! WICHTIG: nach Messverfahren unten korrekt setzen !!!
     ticks_per_rev: 2048.0
 
     # Conservative gains for first hardware test
@@ -28,9 +30,10 @@ hardware_node:
     rl_joint: "joint0"
     rr_joint: "joint1"
 
-    invert_fl: false
+    # Requested invert: FL and RL
+    invert_fl: true
     invert_fr: false
-    invert_rl: false
+    invert_rl: true
     invert_rr: false
 
     # NXT Servo Controller (Pi mapping)
