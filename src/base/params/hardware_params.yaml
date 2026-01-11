@@ -10,28 +10,26 @@ hardware_node:
 
     # ================= Speed estimation =================
     speed_window_s: 0.03
-    meas_alpha: 0.10
+    meas_alpha: 0.15
     meas_w_eps: 0.005
 
-    # ================= Controller (P) =================
+    # ================= Controller (PI - sehr konservativ) =================
     kp: 0.040
-    ki: 0.0
+    ki: 0.040
     kd: 0.0
 
     output_limit: 1.0
     deadband: 0.01
 
     setpoint_max_accel: 2.0
-
-    # weniger aggressives Reset nahe 0
     stop_eps_radps: 0.02
 
     # ================= Actuator shaping =================
     u_slew_rate: 0.0
 
-    # mehr Stiction-Kompensation gegen Rest-Ruckeln
-    u_min: 0.16
-    u_min_apply_radps: 0.20
+    # u_min kleiner, damit kein "Klemmen" um den Sollwert
+    u_min: 0.10
+    u_min_apply_radps: 0.25
 
     u_kick: 0.0
     kick_time_s: 0.0
