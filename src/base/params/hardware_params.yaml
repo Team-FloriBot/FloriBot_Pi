@@ -12,26 +12,28 @@ hardware_node:
     ki: 0.12
     kd: 0.0
     output_limit: 1.0
-    deadband: 0.10
 
-    # weniger aggressive Sollwertrampe -> weniger Überschwingen
+    # Totband etwas kleiner gegen An/Aus
+    deadband: 0.06
+
     setpoint_max_accel: 2.0
     stop_eps_radps: 0.10
 
     # ---------- Measurement ----------
     meas_alpha: 0.20
     meas_w_eps: 0.03
-    # weniger Verzögerung als 0.15s -> mehr Phasenreserve
-    speed_window_s: 0.07
+
+    # leicht mehr Glättung als 0.07, aber deutlich weniger als 0.15
+    speed_window_s: 0.09
 
     # ---------- Actuator shaping ----------
-    u_slew_rate: 2.0
+    # etwas weniger Slew, damit PI nicht "gegen die Rampe" arbeitet
+    u_slew_rate: 1.2
 
-    # stiction compensation aktiv wie vorher (ruckelfrei)
-    u_min: 0.20
+    # u_min reduzieren, damit keine Grenzschwingung um den Sollwert entsteht
+    u_min: 0.14
     u_min_apply_radps: 0.35
 
-    # BOOST AUS
     u_kick: 0.00
     kick_time_s: 0.00
 
