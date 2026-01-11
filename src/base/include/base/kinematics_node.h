@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "rclcpp/rclcpp.hpp"
 #include "geometry_msgs/msg/twist.hpp"
@@ -24,6 +25,8 @@ public:
 private:
   void cmdVelCallback(const geometry_msgs::msg::Twist::SharedPtr msg);
   void wheelTicksCallback(const base::msg::WheelTicks4::SharedPtr msg);
+
+  rcl_interfaces::msg::SetParametersResult onParams(const std::vector<rclcpp::Parameter>& params);
 
   void publishOdom(const rclcpp::Time& stamp, double vx, double wz);
 
@@ -59,6 +62,8 @@ private:
 
   std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
   std::unique_ptr<KinematicsCalculator> kinematics_;
+
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr params_cb_;
 
   // Odom state
   bool have_prev_ticks_{false};
