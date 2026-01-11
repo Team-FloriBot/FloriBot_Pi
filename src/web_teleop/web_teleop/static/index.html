@@ -6,47 +6,53 @@
   <title>FloriBot Web Teleop (Touch Joystick)</title>
 
   <style>
-    /* ---- Mobile Touch Fixes ---- */
+    /* Mobile: keine Textmarkierung/Callouts, kein Highlight */
     * {
-      -webkit-user-select: none;          /* iOS Safari: keine Textmarkierung */
-      -webkit-touch-callout: none;        /* iOS: kein Kontextmenü */
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
       -webkit-tap-highlight-color: transparent;
       user-select: none;
-      touch-action: manipulation;         /* generell: kein Doppeltap-Zoom etc. */
+      touch-action: manipulation;
     }
-    html, body {
-      overscroll-behavior: none;
-    }
+    html, body { overscroll-behavior: none; }
 
     body { font-family: sans-serif; margin: 20px; }
     .wrap { max-width: 720px; }
+
     .card {
-      padding: 14px; border: 1px solid #ddd; border-radius: 12px;
-      display: grid; gap: 10px;
+      padding: 14px;
+      border: 1px solid #ddd;
+      border-radius: 12px;
+      display: grid;
+      gap: 10px;
     }
+
     .status { margin: 0; }
     code { background: #f6f6f6; padding: 2px 6px; border-radius: 6px; }
-    .row { display: grid; grid-template-columns: 200px 1fr 70px; gap: 10px; align-items: center; }
+
+    .row {
+      display: grid;
+      grid-template-columns: 200px 1fr 70px;
+      gap: 10px;
+      align-items: center;
+    }
     input[type="range"] { width: 100%; }
 
     /* Joystick */
     .joy-area {
-      margin-top: 14px;
+      margin-top: 10px;
       display: grid;
-      grid-template-columns: 1fr;
-      gap: 12px;
-      align-items: center;
       justify-items: center;
     }
     .joystick {
-      width: min(70vw, 320px);
+      width: min(75vw, 340px);
       aspect-ratio: 1 / 1;
       border-radius: 999px;
       border: 2px solid #bbb;
       background: radial-gradient(circle at 30% 30%, #fafafa, #eaeaea);
       position: relative;
 
-      touch-action: none;   /* wichtig: kein Scroll/Pan auf dem Joystick */
+      touch-action: none; /* entscheidend: kein Scroll/Pan */
       user-select: none;
       -webkit-user-select: none;
     }
@@ -63,40 +69,36 @@
       pointer-events: none;
     }
     .center-dot {
-      width: 8px; height: 8px; border-radius: 999px;
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
       background: #888;
       position: absolute;
-      left: 50%; top: 50%;
+      left: 50%;
+      top: 50%;
       transform: translate(-50%, -50%);
       opacity: 0.7;
       pointer-events: none;
     }
-    .hint { color: #444; line-height: 1.45; margin: 0; }
-    .btnrow { display:flex; gap:10px; flex-wrap: wrap; }
-    button {
-      padding: 10px 14px; border-radius: 10px; border: 1px solid #bbb;
-      background: #f7f7f7; font-size: 16px;
-    }
-    button:active { background: #eaeaea; }
   </style>
 </head>
 
 <body>
 <div class="wrap">
-  <h2>Web Teleop (Touch-Joystick → /cmd_vel)</h2>
+  <h2>Web Teleop</h2>
 
   <div class="card">
     <p class="status" id="wsStatus">WebSocket: nicht verbunden</p>
     <p class="status">Sende: <code id="out">v=0.00 m/s, w=0.00 rad/s</code></p>
 
     <div class="row">
-      <label for="vmax">Max vor/zurück (m/s)</label>
+      <label for="vmax">Max v (m/s)</label>
       <input id="vmax" type="range" min="0.05" max="1.00" step="0.05" value="0.25" />
       <span id="vmaxVal">0.25</span>
     </div>
 
     <div class="row">
-      <label for="wmax">Max links/rechts (rad/s)</label>
+      <label for="wmax">Max w (rad/s)</label>
       <input id="wmax" type="range" min="0.10" max="3.00" step="0.10" value="0.90" />
       <span id="wmaxVal">0.90</span>
     </div>
@@ -108,21 +110,10 @@
     </div>
 
     <div class="row">
-      <label for="expo">Expo (Feingefühl)</label>
+      <label for="expo">Expo</label>
       <input id="expo" type="range" min="1.0" max="3.0" step="0.1" value="1.6" />
       <span id="expoVal">1.6</span>
     </div>
-
-    <div class="btnrow">
-      <button id="stopBtn" type="button">Stop</button>
-      <button id="recenterBtn" type="button">Stick zentrieren</button>
-    </div>
-
-    <p class="hint">
-      Bedienung: Ziehen im Kreis = fahren.<br>
-      Hoch = vorwärts, runter = rückwärts, links/rechts = drehen.<br>
-      Beim Loslassen stoppt der Roboter (zusätzlich Deadman im Server).
-    </p>
 
     <div class="joy-area">
       <div class="joystick" id="joystick" aria-label="Touch Joystick">
@@ -175,7 +166,7 @@
     const ax = Math.abs(x);
     if (ax < dz) return 0.0;
     const sign = Math.sign(x);
-    const scaled = (ax - dz) / (1.0 - dz); // rescale to [0..1]
+    const scaled = (ax - dz) / (1.0 - dz);
     return sign * scaled;
   }
 
@@ -191,9 +182,8 @@
   let active = false;
   let pointerId = null;
 
-  // normalized command from joystick
-  let jx = 0.0; // left/right  in [-1..1]
-  let jy = 0.0; // up/down     in [-1..1], positive = up
+  let jx = 0.0; // [-1..1], rechts positiv
+  let jy = 0.0; // [-1..1], hoch positiv
 
   function setStickVisual(nx, ny) {
     const rect = joy.getBoundingClientRect();
@@ -201,13 +191,14 @@
     const maxTravel = radius * 0.55;
 
     const px = nx * maxTravel;
-    const py = -ny * maxTravel; // screen y downwards
+    const py = -ny * maxTravel; // Screen-Y nach unten
 
     stick.style.transform = `translate(${px}px, ${py}px) translate(-50%, -50%)`;
   }
 
   function resetJoystick() {
-    jx = 0.0; jy = 0.0;
+    jx = 0.0;
+    jy = 0.0;
     setStickVisual(0.0, 0.0);
   }
 
@@ -222,19 +213,14 @@
     const radius = rect.width * 0.5;
     const maxTravel = radius * 0.55;
 
-    // clamp to circle
     const dist = Math.hypot(dx, dy);
     if (dist > maxTravel && dist > 0) {
       dx = dx * (maxTravel / dist);
       dy = dy * (maxTravel / dist);
     }
 
-    // normalize to [-1..1]
-    const nx = dx / maxTravel;
-    const ny = -dy / maxTravel; // positive when moving up
-
-    jx = clamp(nx, -1.0, 1.0);
-    jy = clamp(ny, -1.0, 1.0);
+    jx = clamp(dx / maxTravel, -1.0, 1.0);
+    jy = clamp(-dy / maxTravel, -1.0, 1.0); // hoch positiv
 
     setStickVisual(jx, jy);
   }
@@ -258,7 +244,7 @@
     active = false;
     pointerId = null;
     resetJoystick();
-    send(0.0, 0.0);
+    send(0.0, 0.0); // sofort stoppen
     outEl.textContent = `v=0.00 m/s, w=0.00 rad/s`;
     e.preventDefault();
   }
@@ -266,23 +252,12 @@
   joy.addEventListener("pointerup", endPointer);
   joy.addEventListener("pointercancel", endPointer);
   joy.addEventListener("lostpointercapture", () => {
-    if (active) {
-      active = false;
-      pointerId = null;
-      resetJoystick();
-      send(0.0, 0.0);
-      outEl.textContent = `v=0.00 m/s, w=0.00 rad/s`;
-    }
-  });
-
-  document.getElementById("stopBtn").addEventListener("click", () => {
+    if (!active) return;
+    active = false;
+    pointerId = null;
     resetJoystick();
     send(0.0, 0.0);
     outEl.textContent = `v=0.00 m/s, w=0.00 rad/s`;
-  });
-
-  document.getElementById("recenterBtn").addEventListener("click", () => {
-    resetJoystick();
   });
 
   // ---------- Control loop (20 Hz) ----------
@@ -298,10 +273,11 @@
     const vMax = Number(vmax.value);
     const wMax = Number(wmax.value);
 
-    // Mapping:
-    // v: y (hoch) -> vorwärts
-    // w: x (rechts) -> rechts drehen  => invertiert, weil bei dir links/rechts vertauscht war
     const v = clamp(y * vMax, -vMax, vMax);
+
+    // Dreh-Richtung soll sich NICHT beim Rückwärtsfahren umkehren:
+    // => w immer vom x ableiten, unabhängig vom Vorzeichen von v
+    // Falls aktuell bei Vorwärts richtig: w = -x*wMax beibehalten.
     const w = clamp((-x) * wMax, -wMax, wMax);
 
     if (!active) {
@@ -314,7 +290,6 @@
     outEl.textContent = `v=${v.toFixed(2)} m/s, w=${w.toFixed(2)} rad/s`;
   }, PERIOD_MS);
 
-  // Init
   resetJoystick();
 </script>
 </body>
