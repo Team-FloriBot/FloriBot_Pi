@@ -5,44 +5,34 @@ hardware_node:
     ticks_frame_id: "base_link"
 
     # ================= Control =================
-    control_dt: 0.02        # 50 Hz Regelung
+    control_dt: 0.02
     ticks_per_rev: 131000.0
 
     # ================= Speed estimation =================
-    # Low-pass time constant (kleiner = weniger Verzögerung)
     speed_window_s: 0.03
-
-    # Zusatzglättung (klein halten, sonst Phasenverlust)
     meas_alpha: 0.10
+    meas_w_eps: 0.005
 
-    # Nullschwelle für Geschwindigkeit
-    meas_w_eps: 0.01
-
-    # ================= Controller (P-TUNING, stabil) =================
+    # ================= Controller (P) =================
     kp: 0.040
     ki: 0.0
     kd: 0.0
 
     output_limit: 1.0
+    deadband: 0.01
 
-    # Totband klein, sonst Takten
-    deadband: 0.02
-
-    # Sollwert-Rampe (unproblematisch für drive_straight)
     setpoint_max_accel: 2.0
 
-    # Unterhalb davon wird gestoppt + Regler zurückgesetzt
-    stop_eps_radps: 0.05
+    # weniger aggressives Reset nahe 0
+    stop_eps_radps: 0.02
 
     # ================= Actuator shaping =================
-    # Slew-Rate aus, um keine Zusatzdynamik reinzubringen
     u_slew_rate: 0.0
 
-    # Stiction-Kompensation aktiv gegen Ruckeln
-    u_min: 0.12
-    u_min_apply_radps: 0.25
+    # mehr Stiction-Kompensation gegen Rest-Ruckeln
+    u_min: 0.16
+    u_min_apply_radps: 0.20
 
-    # Kick deaktiviert
     u_kick: 0.0
     kick_time_s: 0.0
 
