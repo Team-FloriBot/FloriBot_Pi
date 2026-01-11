@@ -1,11 +1,10 @@
 kinematics_node:
   ros__parameters:
-    wheel_separation: 0.385
+    # Rotation: 360° soll, 180° ist  => wheel_separation halbieren
+    wheel_separation: 0.1925
 
-    # Iteration:
-    # Ziel: odom=2.00 m, real=1.865 m  -> Faktor = 1.865/2.00 = 0.9325
-    # vorher: wheel_radius=0.1051 -> neu: 0.1051*0.9325 = 0.0980 m
-    wheel_radius: 0.0980
+    # so lassen, wenn geradeaus jetzt passt
+    wheel_radius: 0.093
 
     ticks_per_rev: 131000.0
     unwrap_modulo: false
