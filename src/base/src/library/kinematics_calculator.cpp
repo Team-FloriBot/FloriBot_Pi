@@ -2,27 +2,24 @@
 
 namespace base {
 
-KinematicsCalculator::KinematicsCalculator(double wheel_sep_m, double wheel_radius_m)
-: wheel_sep_(wheel_sep_m), wheel_rad_(wheel_radius_m) {}
-
-WheelSpeedSet KinematicsCalculator::calculateWheelSpeeds(double linear_x_mps, double angular_z_rps) const {
-  WheelSpeedSet ws;
-  // differential drive inverse kinematics:
-  // v_l = v - w*L/2 ; v_r = v + w*L/2 ; omega = v / r
-  const double v_l = linear_x_mps - angular_z_rps * (wheel_sep_ * 0.5);
-  const double v_r = linear_x_mps + angular_z_rps * (wheel_sep_ * 0.5);
-  ws.left  = v_l / wheel_rad_;
-  ws.right = v_r / wheel_rad_;
-  return ws;
+KinematicsCalculator::KinematicsCalculator(double track_width_m, double wheel_radius_m)
+: track_width_(track_width_m), wheel_radius_(wheel_radius_m)
+{
 }
 
-RobotTwist KinematicsCalculator::calculateRobotTwist(const WheelSpeedSet& s) const {
-  RobotTwist t;
-  const double v_l = s.left  * wheel_rad_;
-  const double v_r = s.right * wheel_rad_;
-  t.linear_x = 0.5 * (v_l + v_r);
-  t.angular_z = (v_r - v_l) / wheel_sep_;
-  return t;
+WheelSpeedSet KinematicsCalculator::calculateWheelSpeeds(double v_mps, double w_radps) const
+{
+  WheelSpeedSet out;
+  // Differential drive:
+  // v_l = v - w * track/2
+  // v_r = v + w * track/2
+  // omega = v / r
+  const double v_l = v_mps - (w_radps * track_width_ * 0.5);
+  const double v_r = v_mps + (w_radps * track_width_ * 0.5);
+
+  out.left  = v_l / wheel_radius_;
+  out.right = v_r / wheel_radius_;
+  return out;
 }
 
-} // namespace base
+}  // namespace base
