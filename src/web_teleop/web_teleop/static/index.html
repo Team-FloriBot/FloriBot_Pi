@@ -127,6 +127,7 @@
   document.addEventListener("gesturechange", e => e.preventDefault(), { passive: false });
   document.addEventListener("gestureend", e => e.preventDefault(), { passive: false });
 
+  // ---------- WebSocket ----------
   const wsStatus = document.getElementById("wsStatus");
   const outEl = document.getElementById("out");
 
@@ -148,10 +149,11 @@
     }
   }
 
-  const V_MAX = 1.0;
-  const W_MAX = 3.0;
+  /* === Maximalwerte (bewusst > 1 m/s) === */
+  const V_MAX = 3.0;   // m/s
+  const W_MAX = 6.0;   // rad/s
 
-  /* === Spin-only Fenster: jetzt ±30° === */
+  /* === Spin-only Fenster === */
   const SPIN_WINDOW_DEG = 30.0;
   const SPIN_WINDOW_RAD = SPIN_WINDOW_DEG * Math.PI / 180.0;
 
@@ -192,6 +194,14 @@
     setStick(jx, jy);
   }
 
+  function stop() {
+    active = false;
+    jx = jy = 0;
+    setStick(0, 0);
+    send(0, 0);
+    outEl.textContent = `v=0.00 m/s, w=0.00 rad/s`;
+  }
+
   joy.addEventListener("pointerdown", e => {
     active = true;
     pointerId = e.pointerId;
@@ -204,22 +214,16 @@
       updateFromPointer(e.clientX, e.clientY);
   });
 
-  function stop() {
-    active = false;
-    jx = jy = 0;
-    setStick(0, 0);
-    send(0, 0);
-    outEl.textContent = `v=0.00 m/s, w=0.00 rad/s`;
-  }
-
   joy.addEventListener("pointerup", stop);
   joy.addEventListener("pointercancel", stop);
   joy.addEventListener("lostpointercapture", stop);
 
+  /* ---------- Control loop ---------- */
   setInterval(() => {
     if (!active) return;
 
     let v = clamp(jy * V_MAX, -V_MAX, V_MAX);
+
     const steerSign = (jy >= 0) ? 1 : -1;
     let w = clamp((-jx * W_MAX) * steerSign, -W_MAX, W_MAX);
 
