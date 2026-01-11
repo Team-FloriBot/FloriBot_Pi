@@ -47,12 +47,12 @@
     }
 
     .status.ok {
-      background: #c8f7c5;     /* grün */
+      background: #c8f7c5;
       color: #1b5e20;
     }
 
     .status.err {
-      background: #f8c7c7;     /* rot */
+      background: #f8c7c7;
       color: #7f0000;
     }
 
@@ -70,7 +70,6 @@
 
     .joystick {
       width: min(86vw, 420px);
-      max-width: 420px;
       aspect-ratio: 1 / 1;
       border-radius: 999px;
       border: 2px solid #bbb;
@@ -128,18 +127,15 @@
   document.addEventListener("gesturechange", e => e.preventDefault(), { passive: false });
   document.addEventListener("gestureend", e => e.preventDefault(), { passive: false });
 
-  // ---------- WebSocket ----------
   const wsStatus = document.getElementById("wsStatus");
   const outEl = document.getElementById("out");
 
   const ws = new WebSocket(`ws://${location.host}/ws`);
-
   ws.onopen = () => {
     wsStatus.textContent = "WebSocket: verbunden";
     wsStatus.classList.remove("err");
     wsStatus.classList.add("ok");
   };
-
   ws.onclose = () => {
     wsStatus.textContent = "WebSocket: nicht verbunden";
     wsStatus.classList.remove("ok");
@@ -148,21 +144,19 @@
 
   function send(v, w) {
     if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ v: v, w: w }));
+      ws.send(JSON.stringify({ v, w }));
     }
   }
 
-  // ---------- Maximalwerte ----------
-  const V_MAX = 1.0;   // m/s
-  const W_MAX = 3.0;   // rad/s
+  const V_MAX = 1.0;
+  const W_MAX = 3.0;
 
-  const SPIN_WINDOW_DEG = 10.0;
+  /* === Spin-only Fenster: jetzt ±30° === */
+  const SPIN_WINDOW_DEG = 30.0;
   const SPIN_WINDOW_RAD = SPIN_WINDOW_DEG * Math.PI / 180.0;
 
   function clamp(x, lo, hi) { return Math.max(lo, Math.min(hi, x)); }
-
   function angleRad(x, y) { return Math.atan2(y, x); }
-
   function absAngleDiff(a, b) {
     let d = a - b;
     while (d > Math.PI) d -= 2 * Math.PI;
@@ -170,46 +164,32 @@
     return Math.abs(d);
   }
 
-  // ---------- Joystick ----------
   const joy = document.getElementById("joystick");
   const stick = document.getElementById("stick");
 
   let active = false;
   let pointerId = null;
-  let jx = 0.0;
-  let jy = 0.0;
+  let jx = 0.0, jy = 0.0;
 
-  function setStickVisual(nx, ny) {
-    const r = joy.getBoundingClientRect().width * 0.5;
-    const m = r * 0.55;
+  function setStick(nx, ny) {
+    const m = joy.getBoundingClientRect().width * 0.275;
     stick.style.transform =
       `translate(${nx * m}px, ${-ny * m}px) translate(-50%, -50%)`;
   }
 
-  function resetJoystick() {
-    jx = 0.0;
-    jy = 0.0;
-    setStickVisual(0, 0);
-  }
-
   function updateFromPointer(x, y) {
-    const rect = joy.getBoundingClientRect();
-    const cx = rect.left + rect.width / 2;
-    const cy = rect.top + rect.height / 2;
-
-    let dx = x - cx;
-    let dy = y - cy;
-
-    const m = rect.width * 0.5 * 0.55;
+    const r = joy.getBoundingClientRect();
+    let dx = x - (r.left + r.width / 2);
+    let dy = y - (r.top + r.height / 2);
+    const m = r.width * 0.275;
     const d = Math.hypot(dx, dy);
     if (d > m && d > 0) {
       dx *= m / d;
       dy *= m / d;
     }
-
     jx = clamp(dx / m, -1, 1);
     jy = clamp(-dy / m, -1, 1);
-    setStickVisual(jx, jy);
+    setStick(jx, jy);
   }
 
   joy.addEventListener("pointerdown", e => {
@@ -217,38 +197,29 @@
     pointerId = e.pointerId;
     joy.setPointerCapture(pointerId);
     updateFromPointer(e.clientX, e.clientY);
-    e.preventDefault();
-  }, { passive: false });
+  });
 
   joy.addEventListener("pointermove", e => {
-    if (!active || e.pointerId !== pointerId) return;
-    updateFromPointer(e.clientX, e.clientY);
-    e.preventDefault();
-  }, { passive: false });
+    if (active && e.pointerId === pointerId)
+      updateFromPointer(e.clientX, e.clientY);
+  });
 
-  function endPointer(e) {
-    if (e.pointerId !== pointerId) return;
+  function stop() {
     active = false;
-    pointerId = null;
-    resetJoystick();
+    jx = jy = 0;
+    setStick(0, 0);
     send(0, 0);
     outEl.textContent = `v=0.00 m/s, w=0.00 rad/s`;
   }
 
-  joy.addEventListener("pointerup", endPointer, { passive: false });
-  joy.addEventListener("pointercancel", endPointer, { passive: false });
-  joy.addEventListener("lostpointercapture", endPointer);
+  joy.addEventListener("pointerup", stop);
+  joy.addEventListener("pointercancel", stop);
+  joy.addEventListener("lostpointercapture", stop);
 
-  // ---------- Control loop ----------
   setInterval(() => {
-    if (!active) {
-      send(0, 0);
-      outEl.textContent = `v=0.00 m/s, w=0.00 rad/s`;
-      return;
-    }
+    if (!active) return;
 
     let v = clamp(jy * V_MAX, -V_MAX, V_MAX);
-
     const steerSign = (jy >= 0) ? 1 : -1;
     let w = clamp((-jx * W_MAX) * steerSign, -W_MAX, W_MAX);
 
@@ -263,8 +234,6 @@
     send(v, w);
     outEl.textContent = `v=${v.toFixed(2)} m/s, w=${w.toFixed(2)} rad/s`;
   }, 50);
-
-  resetJoystick();
 </script>
 </body>
 </html>
