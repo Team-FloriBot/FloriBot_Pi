@@ -17,6 +17,10 @@ static inline bool isZeroStamp(const builtin_interfaces::msg::Time& t)
 KinematicsNode::KinematicsNode()
 : Node("kinematics_node")
 {
+  // enable runtime parameter updates (wheel_separation, wheel_radius, ...)
+  params_cb_ = add_on_set_parameters_callback(
+    std::bind(&KinematicsNode::onParams, this, std::placeholders::_1));
+
   // Parameters
   declare_parameter("wheel_separation", wheel_sep_);
   declare_parameter("wheel_radius", wheel_rad_);
@@ -83,6 +87,70 @@ KinematicsNode::KinematicsNode()
     cmd_vel_topic_.c_str(), wheel_cmd_topic_.c_str(),
     wheel_ticks_topic_.c_str(), odom_topic_.c_str(),
     wheel_sep_, wheel_rad_);
+}
+
+rcl_interfaces::msg::SetParametersResult
+KinematicsNode::onParams(const std::vector<rclcpp::Parameter>& params)
+{
+  rcl_interfaces::msg::SetParametersResult result;
+  result.successful = true;
+  result.reason = "";
+
+  bool rebuild_kin = false;
+
+  for (const auto& p : params) {
+    const auto& name = p.get_name();
+
+    if (name == "wheel_separation") {
+      const double v = p.as_double();
+      if (v <= 0.0) {
+        result.successful = false;
+        result.reason = "wheel_separation must be > 0";
+        return result;
+      }
+      wheel_sep_ = v;
+      rebuild_kin = true;
+    } else if (name == "wheel_radius") {
+      const double v = p.as_double();
+      if (v <= 0.0) {
+        result.successful = false;
+        result.reason = "wheel_radius must be > 0";
+        return result;
+      }
+      wheel_rad_ = v;
+      rebuild_kin = true;
+    } else if (name == "ticks_per_rev") {
+      const double v = p.as_double();
+      if (v <= 0.0) {
+        result.successful = false;
+        result.reason = "ticks_per_rev must be > 0";
+        return result;
+      }
+      ticks_per_rev_ = v;
+    } else if (name == "unwrap_modulo") {
+      unwrap_modulo_ = p.as_bool();
+    } else if (name == "modulo_ticks") {
+      modulo_ticks_ = p.as_int();
+    } else if (name == "publish_tf") {
+      publish_tf_ = p.as_bool();
+    }
+  }
+
+  if (modulo_ticks_ <= 0) {
+    modulo_ticks_ = static_cast<int>(std::llround(ticks_per_rev_));
+  }
+  if (modulo_ticks_ <= 0) {
+    modulo_ticks_ = 1;
+  }
+
+  if (rebuild_kin) {
+    kinematics_ = std::make_unique<KinematicsCalculator>(wheel_sep_, wheel_rad_);
+    RCLCPP_INFO(get_logger(),
+      "Updated kinematics params | wheel_separation=%.6f wheel_radius=%.6f ticks_per_rev=%.1f",
+      wheel_sep_, wheel_rad_, ticks_per_rev_);
+  }
+
+  return result;
 }
 
 void KinematicsNode::cmdVelCallback(const geometry_msgs::msg::Twist::SharedPtr msg)
