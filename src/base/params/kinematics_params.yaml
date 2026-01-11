@@ -1,13 +1,11 @@
 kinematics_node:
   ros__parameters:
-    # Rotation kalibriert:
-    # odom stoppt bei 360°, real 171°
-    # => b_new = b_old * 360/171
-    # bei b_old=0.385 -> b_new=0.8105
     wheel_separation: 0.8105
 
-    # FINAL kalibrierter Radradius
-    wheel_radius: 0.09735
+    # Fein-Kalibrierung (Laser):
+    # real 2.034 m, odom 2.043854715736173 m
+    # Faktor = real/odom = 0.995178 -> Radius minimal kleiner
+    wheel_radius: 0.09688
 
     ticks_per_rev: 131000.0
     unwrap_modulo: false
