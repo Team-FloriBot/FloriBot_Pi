@@ -15,23 +15,13 @@ def generate_launch_description():
 
     phidgets_launch = os.path.join(phidgets_share, "launch", "high_speed_encoder-launch.py")
 
-    # Start the Phidget 1047 encoder driver.
-    # NOTE:
-    # - By default it publishes joint0..joint3.
-    # - If you prefer fl/fr/rl/rr names, set joint*_name parameters here and adjust YAML accordingly.
     phidgets_node = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(phidgets_launch),
         launch_arguments={
-            # Make JointState.position "ticks" (so hardware_node's llround(position) works)
             "joint0_tick2rad": "1.0",
             "joint1_tick2rad": "1.0",
             "joint2_tick2rad": "1.0",
             "joint3_tick2rad": "1.0",
-            # Optional naming (uncomment if you want names instead of joint0..3):
-            # "joint0_name": "rl_joint",
-            # "joint1_name": "rr_joint",
-            # "joint2_name": "fl_joint",
-            # "joint3_name": "fr_joint",
         }.items()
     )
 
@@ -40,13 +30,12 @@ def generate_launch_description():
         "executable": "kinematics_node",
         "name": "kinematics_node",
         "output": "screen",
+        "parameters": [kinematics_params],
     }
-    if os.path.exists(kinematics_params):
-        kinematics_kwargs["parameters"] = [kinematics_params]
 
     return LaunchDescription([
         phidgets_node,
-        Node(**kinematics_kwargs),
+
         Node(
             package="base",
             executable="hardware_node",
@@ -54,4 +43,6 @@ def generate_launch_description():
             output="screen",
             parameters=[hardware_params],
         ),
+
+        Node(**kinematics_kwargs),
     ])
