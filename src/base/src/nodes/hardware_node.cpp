@@ -23,7 +23,7 @@
 #include "base/pid_controller.h"
 
 // ============================================================
-// NXT Servo Controller I2C writer (as in FloriBot Pi code)
+// NXT Servo Controller I2C writer (FloriBot Pi style)
 // - I2C dev: /dev/i2c-1
 // - 7-bit addr: 0x58 (decimal 88)
 // - Pulse write: reg = channel*2 + 66, then write [reg, low, high]
@@ -83,9 +83,10 @@ static bool getJointPosition(const sensor_msgs::msg::JointState& js, const std::
   return true;
 }
 
+// encodertest behavior: JointState.position is already "ticks"
 static int64_t toTicks(double pos, bool invert)
 {
-  const int64_t t = static_cast<int64_t>(std::llround(pos));  // encodertest: position already "ticks"
+  const int64_t t = static_cast<int64_t>(std::llround(pos));
   return invert ? -t : t;
 }
 
@@ -98,14 +99,12 @@ public:
     declareParams();
     getParams();
 
-    // Open I2C motor controller
     nxt_.openBus(i2c_dev_, i2c_addr_);
 
     wheel_cmd_sub_ = create_subscription<base::msg::WheelVelocities>(
       wheel_cmd_topic_, rclcpp::QoS(10),
       std::bind(&HardwareNode::onWheelCmd, this, std::placeholders::_1));
 
-    // Encoder source like in encodertest: /joint_states
     joint_states_sub_ = create_subscription<sensor_msgs::msg::JointState>(
       joint_states_topic_, rclcpp::QoS(10),
       std::bind(&HardwareNode::jointStatesCallback, this, std::placeholders::_1));
@@ -117,9 +116,8 @@ public:
       std::bind(&HardwareNode::controlLoop, this));
 
     RCLCPP_INFO(get_logger(),
-      "hardware_node: using joint_states topic=%s, joints FL=%s FR=%s RL=%s RR=%s",
-      joint_states_topic_.c_str(),
-      fl_joint_.c_str(), fr_joint_.c_str(), rl_joint_.c_str(), rr_joint_.c_str());
+      "hardware_node: motor I2C dev=%s addr=%d, joint_states=%s",
+      i2c_dev_.c_str(), i2c_addr_, joint_states_topic_.c_str());
   }
 
   ~HardwareNode() override
@@ -135,40 +133,38 @@ private:
   std::string wheel_ticks_topic_{"/base/wheel_ticks4"};
   std::string ticks_frame_id_{"base_link"};
 
-  // Control timing + conversion
-  double control_dt_{0.02};        // [s]
-  double ticks_per_rev_{2048.0};   // [ticks / wheel rev]
+  double control_dt_{0.02};
+  double ticks_per_rev_{2048.0};
 
-  // PID parameters
+  // PID
   double kp_{0.6};
   double ki_{0.0};
   double kd_{0.0};
   double output_limit_{1.0};
   double deadband_{0.0};
-  double setpoint_max_accel_{std::numeric_limits<double>::infinity()}; // [rad/s^2]
+  double setpoint_max_accel_{std::numeric_limits<double>::infinity()};
 
-  // ---- Encoder source like encodertest: /joint_states mapping ----
+  // Encoder via /joint_states
   std::string joint_states_topic_{"/joint_states"};
-  std::string fl_joint_{"joint2"};
-  std::string fr_joint_{"joint3"};
-  std::string rl_joint_{"joint0"};
-  std::string rr_joint_{"joint1"};
+  std::string fl_joint_{"fl_joint"};
+  std::string fr_joint_{"fr_joint"};
+  std::string rl_joint_{"rl_joint"};
+  std::string rr_joint_{"rr_joint"};
 
   bool invert_fl_{false};
   bool invert_fr_{false};
   bool invert_rl_{false};
   bool invert_rr_{false};
 
-  rclcpp::Time last_joint_stamp_;
   bool have_joint_state_{false};
+  rclcpp::Time last_joint_stamp_;
 
-  // ---- Motor mapping params (Pi style) ----
+  // Motor (I2C Pi mapping)
   std::string i2c_dev_{"/dev/i2c-1"};
-  int i2c_addr_{0x58}; // 7-bit addr, default 0x58 = 88
+  int i2c_addr_{0x58};
 
-  // Order is [FL, FR, RL, RR]
-  std::array<int, 4> wheel_channels_{{2, 3, 0, 1}};
-  std::array<double, 4> wheel_gains_{{1.0, 1.0, 1.0, 1.0}};
+  std::array<int, 4> wheel_channels_{{2, 3, 0, 1}};            // [FL, FR, RL, RR]
+  std::array<double, 4> wheel_gains_{{1.0, 1.0, 1.0, 1.0}};    // sign/polarity per wheel
 
   double k_us_per_pct_{5.5};
   int neutral_us_{1480};
@@ -177,37 +173,33 @@ private:
   int pct_min_{-100};
   int pct_max_{100};
 
-  // ---- ROS ----
+  // ROS
   rclcpp::Subscription<base::msg::WheelVelocities>::SharedPtr wheel_cmd_sub_;
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_states_sub_;
   rclcpp::Publisher<base::msg::WheelTicks4>::SharedPtr ticks_pub_;
   rclcpp::TimerBase::SharedPtr timer_;
 
-  // ---- Controllers ----
+  // Controllers
   std::array<std::unique_ptr<base::PIDController>, WHEEL_COUNT> pid_{};
 
-  // Targets (rad/s)
+  // targets (rad/s)
   double target_w_radps_[WHEEL_COUNT]{0.0, 0.0, 0.0, 0.0};
 
-  // Encoder ticks (absolute), updated from joint_states
+  // encoder ticks (absolute)
   std::atomic<int64_t> ticks_[WHEEL_COUNT]{0, 0, 0, 0};
   int64_t ticks_last_[WHEEL_COUNT]{0, 0, 0, 0};
 
-  // Motor driver
   NxtServoI2C nxt_;
 
   void declareParams()
   {
-    // Topics
     declare_parameter<std::string>("wheel_cmd_topic", wheel_cmd_topic_);
     declare_parameter<std::string>("wheel_ticks_topic", wheel_ticks_topic_);
     declare_parameter<std::string>("ticks_frame_id", ticks_frame_id_);
 
-    // Timing + encoder conversion
     declare_parameter<double>("control_dt", control_dt_);
     declare_parameter<double>("ticks_per_rev", ticks_per_rev_);
 
-    // PID
     declare_parameter<double>("kp", kp_);
     declare_parameter<double>("ki", ki_);
     declare_parameter<double>("kd", kd_);
@@ -215,7 +207,6 @@ private:
     declare_parameter<double>("deadband", deadband_);
     declare_parameter<double>("setpoint_max_accel", setpoint_max_accel_);
 
-    // joint_states mapping (encodertest style)
     declare_parameter<std::string>("joint_states_topic", joint_states_topic_);
     declare_parameter<std::string>("fl_joint", fl_joint_);
     declare_parameter<std::string>("fr_joint", fr_joint_);
@@ -227,7 +218,6 @@ private:
     declare_parameter<bool>("invert_rl", invert_rl_);
     declare_parameter<bool>("invert_rr", invert_rr_);
 
-    // Motor (I2C)
     declare_parameter<std::string>("i2c_dev", i2c_dev_);
     declare_parameter<int>("i2c_addr", i2c_addr_);
 
@@ -352,13 +342,12 @@ private:
 
   void controlLoop()
   {
-    // Without joint_states we can't compute speed -> keep motors neutral
     if (!have_joint_state_) {
+      // no encoder feedback yet -> hold neutral
       for (int i = 0; i < WHEEL_COUNT; ++i) writeMotor(i, 0.0);
       return;
     }
 
-    // measured wheel speed from tick delta
     double meas_w_radps[WHEEL_COUNT]{0.0, 0.0, 0.0, 0.0};
 
     for (int i = 0; i < WHEEL_COUNT; ++i) {
