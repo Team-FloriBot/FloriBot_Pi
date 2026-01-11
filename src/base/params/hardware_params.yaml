@@ -7,35 +7,33 @@ hardware_node:
     control_dt: 0.02
     ticks_per_rev: 131000.0
 
-    # PID (ruhig bei low speed)
-    kp: 0.06
-    ki: 0.30
+    # PID: ruhiger, mehr I gegen Reibung
+    kp: 0.05
+    ki: 0.40
     kd: 0.0
     output_limit: 1.0
     deadband: 0.10
-    setpoint_max_accel: 1.5
+    setpoint_max_accel: 1.2
     stop_eps_radps: 0.05
 
     # measurement smoothing
-    meas_alpha: 0.25
+    meas_alpha: 0.20
     meas_w_eps: 0.03
 
-    # KEY: speed estimate over longer window
-    speed_window_s: 0.10
+    # KEY: noch längeres Fenster -> weniger low-speed "0/1 tick" Sägen
+    speed_window_s: 0.15
 
     # output smoothing
-    u_slew_rate: 1.0
+    u_slew_rate: 0.8
 
     # stiction compensation
-    u_min: 0.18
+    u_min: 0.22
     u_kick: 0.00
     kick_time_s: 0.00
 
-    # I2C
     i2c_dev: "/dev/i2c-1"
     i2c_addr: 88
 
-    # [FL, FR, RL, RR]
     wheel_channels: [2, 3, 0, 1]
     wheel_gains:    [1.0, 1.0, 1.0, 1.0]
 
@@ -46,11 +44,9 @@ hardware_node:
     pct_min: -100
     pct_max: 100
 
-    # Phidget 1047
     phidget_serial: -1
     encoder_channels: [2, 3, 0, 1]
 
-    # FL + RL invertiert
     invert_fl: true
     invert_fr: false
     invert_rl: true
