@@ -4,51 +4,49 @@ hardware_node:
     wheel_ticks_topic: "/base/wheel_ticks4"
     ticks_frame_id: "base_link"
 
-    # ---------------- Control ----------------
-    # Control loop period (s)
-    control_dt: 0.02
-
-    # Encoder ticks per wheel revolution
+    # ================= Control =================
+    control_dt: 0.02        # 50 Hz Regelung
     ticks_per_rev: 131000.0
 
-    # ---------------- Speed estimation / filtering ----------------
-    # speed_window_s is interpreted as a low-pass time constant tau (s)
-    speed_window_s: 0.05
+    # ================= Speed estimation =================
+    # Low-pass time constant (kleiner = weniger Verzögerung)
+    speed_window_s: 0.03
 
-    # additional smoothing (0 = none, 1 = very strong)
-    meas_alpha: 0.20
+    # Zusatzglättung (klein halten, sonst Phasenverlust)
+    meas_alpha: 0.10
 
-    # speeds below this are forced to zero (rad/s)
-    meas_w_eps: 0.03
+    # Nullschwelle für Geschwindigkeit
+    meas_w_eps: 0.01
 
-    # ---------------- Controller (P-TUNING) ----------------
-    # Überschwingen → KP reduziert
-    kp: 0.035
+    # ================= Controller (P-TUNING, stabil) =================
+    kp: 0.040
     ki: 0.0
     kd: 0.0
 
     output_limit: 1.0
-    deadband: 0.10
 
-    # moderate ramp, damit kein Setpoint-Schock
+    # Totband klein, sonst Takten
+    deadband: 0.02
+
+    # Sollwert-Rampe (unproblematisch für drive_straight)
     setpoint_max_accel: 2.0
 
-    # below this setpoint PID is reset and motor stopped
-    stop_eps_radps: 0.10
+    # Unterhalb davon wird gestoppt + Regler zurückgesetzt
+    stop_eps_radps: 0.05
 
-    # ---------------- Actuator shaping (DISABLED for tuning) ----------------
-    # slew rate limiting disabled
+    # ================= Actuator shaping =================
+    # Slew-Rate aus, um keine Zusatzdynamik reinzubringen
     u_slew_rate: 0.0
 
-    # stiction compensation disabled
-    u_min: 0.0
-    u_min_apply_radps: 0.35
+    # Stiction-Kompensation aktiv gegen Ruckeln
+    u_min: 0.12
+    u_min_apply_radps: 0.25
 
-    # start kick disabled
+    # Kick deaktiviert
     u_kick: 0.0
     kick_time_s: 0.0
 
-    # ---------------- Hardware ----------------
+    # ================= Hardware =================
     i2c_dev: "/dev/i2c-1"
     i2c_addr: 88
 
