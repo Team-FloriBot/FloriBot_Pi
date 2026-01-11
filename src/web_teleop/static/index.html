@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Web Teleop</title>
+  <style>
+    body { font-family: sans-serif; margin: 24px; }
+    button { width: 120px; height: 60px; margin: 6px; font-size: 18px; }
+    .row { display: flex; }
+    .status { margin-top: 12px; }
+  </style>
+</head>
+<body>
+  <h2>Web Teleop (publish /cmd_vel)</h2>
+
+  <div class="row"><button id="fwd">▲</button></div>
+  <div class="row">
+    <button id="left">◀</button>
+    <button id="stop">■</button>
+    <button id="right">▶</button>
+  </div>
+  <div class="row"><button id="back">▼</button></div>
+
+  <div class="status" id="status">Status: nicht verbunden</div>
+
+<script>
+  const statusEl = document.getElementById("status");
+  const ws = new WebSocket(`ws://${location.host}/ws`);
+
+  ws.onopen = () => statusEl.textContent = "Status: verbunden";
+  ws.onclose = () => statusEl.textContent = "Status: getrennt";
+
+  function send(v, w) {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({v: v, w: w}));
+    }
+  }
+
+  // Limits (passen zu max_linear / max_angular im Server)
+  const V = 0.25;  // m/s
+  const W = 0.9;   // rad/s
+
+  function bindHold(btn, v, w) {
+    const el = document.getElementById(btn);
+    let timer = null;
+
+    const start = () => {
+      send(v, w);
+      timer = setInterval(() => send(v, w), 50); // 20 Hz keep-alive
+    };
+    const stop = () => {
+      if (timer) clearInterval(timer);
+      timer = null;
+      send(0.0, 0.0);
+    };
+
+    el.addEventListener("pointerdown", start);
+    el.addEventListener("pointerup", stop);
+    el.addEventListener("pointercancel", stop);
+    el.addEventListener("mouseleave", stop);
+    el.addEventListener("touchend", stop);
+  }
+
+  bindHold("fwd",  V, 0.0);
+  bindHold("back", -V, 0.0);
+  bindHold("left", 0.0,  W);
+  bindHold("right",0.0, -W);
+
+  document.getElementById("stop").onclick = () => send(0.0, 0.0);
+</script>
+</body>
+</html>
