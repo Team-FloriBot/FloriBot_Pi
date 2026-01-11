@@ -3,71 +3,166 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Web Teleop</title>
+  <title>FloriBot Web Teleop (1 Stick)</title>
   <style>
     body { font-family: sans-serif; margin: 24px; }
-    button { width: 120px; height: 60px; margin: 6px; font-size: 18px; }
-    .row { display: flex; }
-    .status { margin-top: 12px; }
+    .card { padding: 14px; border: 1px solid #ddd; border-radius: 10px; max-width: 560px; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 10px; align-items: center; }
+    label { display: inline-block; min-width: 180px; }
+    input[type="range"] { width: 260px; }
+    .status { margin-top: 10px; }
+    code { background: #f6f6f6; padding: 2px 6px; border-radius: 6px; }
+    .hint { color: #444; line-height: 1.4; margin-top: 10px; }
   </style>
 </head>
 <body>
-  <h2>Web Teleop (publish /cmd_vel)</h2>
+  <h2>Web Teleop (1 Joystick → /cmd_vel)</h2>
 
-  <div class="row"><button id="fwd">▲</button></div>
-  <div class="row">
-    <button id="left">◀</button>
-    <button id="stop">■</button>
-    <button id="right">▶</button>
+  <div class="card">
+    <div class="status" id="wsStatus">WebSocket: nicht verbunden</div>
+    <div class="status" id="gpStatus">Joystick: nicht verbunden</div>
+    <div class="status">Sende: <code id="out">v=0.00 m/s, w=0.00 rad/s</code></div>
+
+    <div class="row">
+      <label for="vmax">Max vor/zurück (m/s)</label>
+      <input id="vmax" type="range" min="0.05" max="1.00" step="0.05" value="0.25" />
+      <span id="vmaxVal">0.25</span>
+    </div>
+
+    <div class="row">
+      <label for="wmax">Max links/rechts (rad/s)</label>
+      <input id="wmax" type="range" min="0.10" max="3.00" step="0.10" value="0.90" />
+      <span id="wmaxVal">0.90</span>
+    </div>
+
+    <div class="row">
+      <label for="deadzone">Deadzone</label>
+      <input id="deadzone" type="range" min="0.00" max="0.30" step="0.01" value="0.08" />
+      <span id="deadzoneVal">0.08</span>
+    </div>
+
+    <div class="row">
+      <label for="expo">Expo (Feingefühl)</label>
+      <input id="expo" type="range" min="1.0" max="3.0" step="0.1" value="1.6" />
+      <span id="expoVal">1.6</span>
+    </div>
+
+    <div class="hint">
+      Steuerung: <b>ein Stick</b><br>
+      <b>hoch</b> = vorwärts, <b>runter</b> = rückwärts, <b>links/rechts</b> = drehen.<br>
+      Hinweis: Manche Browser liefern Achsenwerte erst, nachdem du einmal einen Button am Controller gedrückt hast.
+    </div>
   </div>
-  <div class="row"><button id="back">▼</button></div>
-
-  <div class="status" id="status">Status: nicht verbunden</div>
 
 <script>
-  const statusEl = document.getElementById("status");
-  const ws = new WebSocket(`ws://${location.host}/ws`);
+  // ---------- WebSocket ----------
+  const wsStatus = document.getElementById("wsStatus");
+  const gpStatus = document.getElementById("gpStatus");
+  const outEl = document.getElementById("out");
 
-  ws.onopen = () => statusEl.textContent = "Status: verbunden";
-  ws.onclose = () => statusEl.textContent = "Status: getrennt";
+  const ws = new WebSocket(`ws://${location.host}/ws`);
+  ws.onopen = () => wsStatus.textContent = "WebSocket: verbunden";
+  ws.onclose = () => wsStatus.textContent = "WebSocket: getrennt";
 
   function send(v, w) {
     if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({v: v, w: w}));
+      ws.send(JSON.stringify({ v: v, w: w }));
     }
   }
 
-  // Limits (passen zu max_linear / max_angular im Server)
-  const V = 0.25;  // m/s
-  const W = 0.9;   // rad/s
+  // ---------- UI ----------
+  const vmax = document.getElementById("vmax");
+  const wmax = document.getElementById("wmax");
+  const deadzone = document.getElementById("deadzone");
+  const expo = document.getElementById("expo");
 
-  function bindHold(btn, v, w) {
-    const el = document.getElementById(btn);
-    let timer = null;
+  const vmaxVal = document.getElementById("vmaxVal");
+  const wmaxVal = document.getElementById("wmaxVal");
+  const deadzoneVal = document.getElementById("deadzoneVal");
+  const expoVal = document.getElementById("expoVal");
 
-    const start = () => {
-      send(v, w);
-      timer = setInterval(() => send(v, w), 50); // 20 Hz keep-alive
-    };
-    const stop = () => {
-      if (timer) clearInterval(timer);
-      timer = null;
-      send(0.0, 0.0);
-    };
+  function updateLabels() {
+    vmaxVal.textContent = Number(vmax.value).toFixed(2);
+    wmaxVal.textContent = Number(wmax.value).toFixed(2);
+    deadzoneVal.textContent = Number(deadzone.value).toFixed(2);
+    expoVal.textContent = Number(expo.value).toFixed(1);
+  }
+  vmax.oninput = wmax.oninput = deadzone.oninput = expo.oninput = updateLabels;
+  updateLabels();
 
-    el.addEventListener("pointerdown", start);
-    el.addEventListener("pointerup", stop);
-    el.addEventListener("pointercancel", stop);
-    el.addEventListener("mouseleave", stop);
-    el.addEventListener("touchend", stop);
+  // ---------- Math helpers ----------
+  function clamp(x, lo, hi) { return Math.max(lo, Math.min(hi, x)); }
+
+  function applyDeadzone(x, dz) {
+    const ax = Math.abs(x);
+    if (ax < dz) return 0.0;
+    const sign = Math.sign(x);
+    const scaled = (ax - dz) / (1.0 - dz); // rescale to [0..1]
+    return sign * scaled;
   }
 
-  bindHold("fwd",  V, 0.0);
-  bindHold("back", -V, 0.0);
-  bindHold("left", 0.0,  W);
-  bindHold("right",0.0, -W);
+  // Expo: |x|^e mit Vorzeichen, e>1 => feinfühlig um 0
+  function applyExpo(x, e) {
+    const sign = Math.sign(x);
+    return sign * Math.pow(Math.abs(x), e);
+  }
 
-  document.getElementById("stop").onclick = () => send(0.0, 0.0);
+  function getBestGamepad() {
+    const gps = navigator.getGamepads ? navigator.getGamepads() : [];
+    for (const gp of gps) {
+      if (gp && gp.connected) return gp;
+    }
+    return null;
+  }
+
+  let lastId = "";
+
+  window.addEventListener("gamepadconnected", (e) => {
+    lastId = e.gamepad.id;
+    gpStatus.textContent = `Joystick: verbunden (${lastId})`;
+  });
+  window.addEventListener("gamepaddisconnected", () => {
+    lastId = "";
+    gpStatus.textContent = "Joystick: nicht verbunden";
+  });
+
+  // ---------- Control loop (20 Hz) ----------
+  const PERIOD_MS = 50;
+
+  setInterval(() => {
+    const gp = getBestGamepad();
+
+    if (!gp) {
+      gpStatus.textContent = "Joystick: nicht verbunden";
+      send(0.0, 0.0);
+      outEl.textContent = `v=0.00 m/s, w=0.00 rad/s`;
+      return;
+    }
+
+    // Ein Stick: nimm linken Stick (üblich)
+    // axes[0]=LS X, axes[1]=LS Y
+    let x = gp.axes[0] ?? 0.0;  // links/rechts
+    let y = gp.axes[1] ?? 0.0;  // hoch/runter (oben = -1)
+
+    const dz = Number(deadzone.value);
+    const e  = Number(expo.value);
+
+    x = applyExpo(applyDeadzone(x, dz), e);
+    y = applyExpo(applyDeadzone(y, dz), e);
+
+    // Mapping:
+    // v: vorwärts = -y
+    // w: drehen = x
+    const vMax = Number(vmax.value);
+    const wMax = Number(wmax.value);
+
+    const v = clamp((-y) * vMax, -vMax, vMax);
+    const w = clamp(( x) * wMax, -wMax, wMax);
+
+    send(v, w);
+    outEl.textContent = `v=${v.toFixed(2)} m/s, w=${w.toFixed(2)} rad/s`;
+    gpStatus.textContent = `Joystick: verbunden (${gp.id})`;
+  }, PERIOD_MS);
 </script>
 </body>
 </html>
