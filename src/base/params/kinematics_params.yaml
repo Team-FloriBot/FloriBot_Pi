@@ -2,11 +2,13 @@ kinematics_node:
   ros__parameters:
     wheel_separation: 0.385
 
-    # korrigiert wegen +10% Wegfehler (2.0m Soll -> 2.2m Ist):
-    # r_new = r_old * 2.0/2.2 = 0.100 * 0.90909 = 0.0909 m
-    wheel_radius: 0.0909
+    # Raddurchmesser 18.6 cm => Radius 0.093 m
+    wheel_radius: 0.093
 
+    # Phidget: 500 CPR * 4 * 65.5 = 131000 ticks / wheel revolution
     ticks_per_rev: 131000.0
+
+    # continuous ticks (callback accumulated) -> no wrap
     unwrap_modulo: false
     modulo_ticks: 131000
 
