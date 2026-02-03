@@ -8,7 +8,7 @@ kinematics_node:
     wheel_radius: 0.09852
 
     # Rotation separat kalibriert lassen (unverändert)
-    wheel_separation: 0.8041
+    wheel_separation: 0.82628
 
     ticks_per_rev: 131000.0
     unwrap_modulo: false
