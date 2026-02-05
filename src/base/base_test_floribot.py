@@ -30,7 +30,7 @@ class MotionTestNode(Node):
         self.y_data.append(msg.pose.pose.position.y)
         self.q_data.append(msg.pose.pose.orientation)
 
-    # Helper: sicheren Twist erzeugen
+    # Helper: Twist erzeugen
     def _make_twist(self, lx=0.0, ly=0.0, lz=0.0, ax=0.0, ay=0.0, az=0.0):
         twist = Twist()
         twist.linear.x = float(lx)
@@ -107,7 +107,7 @@ class MotionTestNode(Node):
         self.get_logger().info('Rotation beendet')
         self._plot_path(f'{n_rotations}x Rotation')
 
-    # Kreisfahrt (über v, omega, odom-basiert optional)
+    # Kreisfahrt (über v, omega, odom-basiert)
     def drive_circle(self, radius, v, n_circles=1):
         if not self.q_data:
             self.get_logger().info('Keine Odom-Daten verfügbar!')
