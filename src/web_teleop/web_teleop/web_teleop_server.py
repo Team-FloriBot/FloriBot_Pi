@@ -55,13 +55,11 @@ class CmdVelBridge(Node):
 
 
 async def ros_spin(node: Node, stop_event: asyncio.Event):
-    # spin_once in einer asyncio-Schleife, bis stop_event gesetzt ist
     try:
         while rclpy.ok() and not stop_event.is_set():
             rclpy.spin_once(node, timeout_sec=0.0)
             await asyncio.sleep(0.001)
     except asyncio.CancelledError:
-        # Task wird beim Shutdown gecancelt
         pass
 
 
@@ -117,11 +115,9 @@ async def main_async():
     loop = asyncio.get_running_loop()
 
     def request_shutdown():
-        # Uvicorn und ROS Tasks zum Beenden auffordern
         stop_event.set()
         server.should_exit = True
 
-    # Sauberes Ctrl+C / systemd stop
     try:
         loop.add_signal_handler(signal.SIGINT, request_shutdown)
         loop.add_signal_handler(signal.SIGTERM, request_shutdown)
@@ -134,22 +130,18 @@ async def main_async():
     web_task = asyncio.create_task(server.serve())
 
     try:
-        # Warte bis einer fertig ist (oder Signal kommt)
         done, pending = await asyncio.wait(
             {ros_task, web_task},
             return_when=asyncio.FIRST_COMPLETED,
         )
 
-        # Wenn Uvicorn beendet (oder Signal), Shutdown anstoßen
         request_shutdown()
 
-        # Restliche Tasks beenden
         for t in pending:
             t.cancel()
         await asyncio.gather(*pending, return_exceptions=True)
 
     finally:
-        # ROS sauber runterfahren
         try:
             bridge.destroy_node()
         except Exception:
