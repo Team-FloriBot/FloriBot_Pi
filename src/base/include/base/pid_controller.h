@@ -9,7 +9,7 @@ namespace base {
  * - output saturation (|u| <= output_limit)
  * - deadband on output
  * - integrator clamping (simple anti-windup)
- * - optional setpoint ramp limiting via max_accel (units: setpoint units per second)
+ * - setpoint ramp limiting via max_accel (units: setpoint units per second)
  */
 class PIDController {
 public:
@@ -42,4 +42,4 @@ private:
   bool first_run_{true};
 };
 
-} // namespace base
+} 

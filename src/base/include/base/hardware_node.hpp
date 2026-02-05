@@ -35,7 +35,7 @@ private:
   void initEncoders();
   void closeEncoders();
 
-  std::array<void*,4> enc_{ {nullptr,nullptr,nullptr,nullptr} }; // PhidgetEncoderHandle but avoid exposing here
+  std::array<void*,4> enc_{ {nullptr,nullptr,nullptr,nullptr} };
   std::array<std::atomic<int64_t>,4> ticks_;
   std::array<int64_t,4> last_ticks_{ {0,0,0,0} };
 

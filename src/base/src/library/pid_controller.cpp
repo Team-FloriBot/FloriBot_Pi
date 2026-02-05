@@ -57,8 +57,7 @@ double PIDController::compute(double target_setpoint, double measured, double dt
 
     double u = p + integrator + d;
 
-    // saturation + conditional anti-windup:
-    // allow integration only if it does NOT drive further into saturation.
+    // saturation + anti-windup:
     if (u > out_lim_) {
       u = out_lim_;
       if (!freeze_integrator && error > 0.0) {
@@ -92,4 +91,4 @@ double PIDController::compute(double target_setpoint, double measured, double dt
   return core(integrator_, prev_error_, last_output_, ramped_setpoint_, first_run_);
 }
 
-} // namespace base
+} 

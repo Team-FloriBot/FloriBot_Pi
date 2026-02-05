@@ -21,6 +21,6 @@ private:
   double wheel_radius_{0.0};
 };
 
-}  // namespace base
+}  
 
-#endif  // BASE_KINEMATICS_CALCULATOR_H
+#endif  

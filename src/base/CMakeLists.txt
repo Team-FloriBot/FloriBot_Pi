@@ -18,7 +18,7 @@ find_package(tf2_ros REQUIRED)
 
 find_package(rosidl_default_generators REQUIRED)
 
-# ---- Phidget22 (no pkg-config required) ----
+# ---- Phidget22  ----
 find_path(PHIDGET22_INCLUDE_DIR
   NAMES phidget22.h
   PATHS /usr/include /usr/local/include

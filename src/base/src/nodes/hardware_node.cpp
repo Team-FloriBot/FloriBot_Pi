@@ -172,13 +172,13 @@ private:
   // Output slew
   double u_slew_rate_{1.0}; // 1/s, 0 disables
 
-  // Friction compensation (smooth feedforward)
+  // Friction compensation 
   // u_min is kept for backward compatibility and used as feedforward amplitude.
-  double u_min_{0.18};               // feedforward amplitude (0..1)
-  double u_min_apply_radps_{0.0};    // apply feedforward only if |setpoint| >= this
-  double u_ff_w0_radps_{1.5};        // shaping (rad/s): larger -> slower rise
-  double u_kick_{0.0};               // optional start kick (additive)
-  double kick_time_s_{0.0};          // duration after direction change/start
+  double u_min_{0.18};               
+  double u_min_apply_radps_{0.0};    
+  double u_ff_w0_radps_{1.5};        
+  double u_kick_{0.0};               
+  double kick_time_s_{0.0};         
 
   // I2C
   std::string i2c_dev_{"/dev/i2c-1"};
@@ -466,25 +466,22 @@ private:
 
       const int dir = signum(sp);
       if (dir != 0 && dir != last_dir_[i]) {
-        // direction change or start -> allow kick window
         kick_until_[i] = t + rclcpp::Duration::from_seconds(kick_time_s_);
         last_dir_[i] = dir;
       }
 
-      // --- friction feedforward (smooth) + feedback ---
-      // Preview feedback to detect slew limiting without advancing controller state.
+      // friction feedforward
       const double u_fb_preview = pid_[i]->compute(sp, meas_w_filt_[i], control_dt_, false, false);
 
       double u_ff = 0.0;
       if (dir != 0) {
         if (std::abs(sp) >= u_min_apply_radps_) {
           const double s = std::abs(sp);
-          // smooth rise: 0 .. u_min_ as |sp| increases
           u_ff = static_cast<double>(dir) * u_min_ * (1.0 - std::exp(-s / u_ff_w0_radps_));
         }
       }
 
-      // include kick in preview (it is additive and independent of PID state)
+      // include kick in preview
       double u_preview = u_fb_preview + u_ff;
       if (u_kick_ > 0.0 && kick_time_s_ > 0.0) {
         if (t < kick_until_[i]) {
@@ -500,13 +497,13 @@ private:
         slew_limited = (std::abs(u_limited - u_preview) > 1e-12);
       }
 
-      // now compute feedback with correct integrator handling (freeze if slew-limited)
+      // compute feedback
       const double u_fb = pid_[i]->compute(sp, meas_w_filt_[i], control_dt_, slew_limited, true);
 
       double u = u_fb + u_ff;
       u = clampDouble(u, -output_limit_, output_limit_);
 
-      // optional start kick (additive)
+      // start kick
       if (u_kick_ > 0.0 && kick_time_s_ > 0.0) {
         if (t < kick_until_[i]) {
           u = clampDouble(u + static_cast<double>(dir) * u_kick_, -output_limit_, output_limit_);

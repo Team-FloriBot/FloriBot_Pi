@@ -22,4 +22,4 @@ WheelSpeedSet KinematicsCalculator::calculateWheelSpeeds(double v_mps, double w_
   return out;
 }
 
-}  // namespace base
+} 

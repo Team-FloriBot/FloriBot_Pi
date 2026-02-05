@@ -40,7 +40,7 @@ private:
   // Phidget 4x quadrature + gear: 500 CPR * 4 * 65.5 = 131000 ticks / wheel rev
   double ticks_per_rev_{131000.0};
 
-  // With continuous ticks (callback accumulated) no wrap needed
+
   bool unwrap_modulo_{false};
   int modulo_ticks_{131000};
 
@@ -75,6 +75,6 @@ private:
   double theta_{0.0};
 };
 
-} // namespace base
+} 
 
-#endif // BASE_KINEMATICS_NODE_H
+#endif 
